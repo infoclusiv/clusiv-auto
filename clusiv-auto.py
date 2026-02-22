@@ -12,9 +12,12 @@ from datetime import datetime, timedelta, timezone
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 
-# --- 1. CONFIGURACIÓN Y PERSISTENCIA ---
+# --- 1. CONFIGURACIÓN Y RUTAS ---
 load_dotenv()
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
+
+# Ruta específica proporcionada por el usuario
+PATH_CHATGPT = r"C:\Users\carlo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Aplicaciones de Chrome\ChatGPT.lnk"
 
 CONFIG_FILE = "config_automatizacion.json"
 DATABASE_FILE = "channels.db"
@@ -41,6 +44,7 @@ Based on your analysis, generate **5 new high-performing title variations in ENG
 4.  **Length:** Keep them concise (optimized for mobile).
 5.  **Variety:** Provide different angles (e.g., a warning, a question, a scenario)."""
 
+# --- 2. GESTIÓN DE CONFIGURACIÓN Y BASE DE DATOS ---
 def guardar_config(ruta=None, prompt=None):
     config = cargar_toda_config()
     if ruta is not None: config["ruta_proyectos"] = ruta
@@ -57,7 +61,6 @@ def cargar_toda_config():
             return conf
     return {"ruta_proyectos": "", "prompt_template": PROMPT_DEFAULT}
 
-# --- 2. LÓGICA DE BASE DE DATOS ---
 def init_db():
     conn = sqlite3.connect(DATABASE_FILE)
     conn.execute('''CREATE TABLE IF NOT EXISTS channels 
@@ -68,18 +71,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-def agregar_canal_db(ch_id, ch_name, ch_cat):
-    conn = sqlite3.connect(DATABASE_FILE)
-    try:
-        conn.execute('INSERT INTO channels (channel_id, channel_name, category) VALUES (?, ?, ?)', 
-                     (ch_id.strip(), ch_name.strip(), ch_cat.strip()))
-        conn.commit()
-        return True, f"Canal '{ch_name}' guardado."
-    except sqlite3.IntegrityError:
-        return False, "Ese ID de canal ya existe."
-    finally:
-        conn.close()
-
 def obtener_canales_db():
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
@@ -88,44 +79,51 @@ def obtener_canales_db():
     conn.close()
     return rows
 
+def agregar_canal_db(ch_id, ch_name):
+    conn = sqlite3.connect(DATABASE_FILE)
+    try:
+        conn.execute('INSERT INTO channels (channel_id, channel_name) VALUES (?, ?)', 
+                     (ch_id.strip(), ch_name.strip()))
+        conn.commit()
+        return True, f"Canal '{ch_name}' guardado."
+    except sqlite3.IntegrityError:
+        return False, "El ID del canal ya existe."
+    finally:
+        conn.close()
+
 def eliminar_canal_db(ch_id):
     conn = sqlite3.connect(DATABASE_FILE)
     conn.execute("DELETE FROM channels WHERE channel_id = ?", (ch_id,))
     conn.commit()
     conn.close()
 
-# --- 3. LÓGICA DE YOUTUBE ---
+# --- 3. LÓGICA DE YOUTUBE Y CARPETAS ---
 def analizar_rendimiento_canal(channel_id):
     if not YOUTUBE_API_KEY: return None
     try:
         youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
         fecha_limite = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat().replace('+00:00', 'Z')
-        
         search_res = youtube.search().list(
             part='id', channelId=channel_id, publishedAfter=fecha_limite, 
             type='video', maxResults=50, order='date'
         ).execute()
-        
         video_ids = [item['id']['videoId'] for item in search_res.get('items', [])]
         if not video_ids: return None
-
         stats_res = youtube.videos().list(part='snippet,statistics', id=','.join(video_ids)).execute()
         videos_data = [{'title': i['snippet']['title'], 'views': int(i['statistics'].get('viewCount', 0))} for i in stats_res.get('items', [])]
-        
         if not videos_data: return None
         avg = sum(v['views'] for v in videos_data) / len(videos_data)
         ganadores = sorted([v for v in videos_data if v['views'] > avg], key=lambda x: x['views'], reverse=True)
         return {"avg": avg, "ganadores": ganadores}
     except: return None
 
-# --- 4. LÓGICA DE CARPETAS ---
 def obtener_siguiente_num(ruta_base):
     if not ruta_base or not os.path.exists(ruta_base): return 1
     carpetas = [d for d in os.listdir(ruta_base) if os.path.isdir(os.path.join(ruta_base, d))]
     nums = [int(m.group(1)) for c in carpetas if (m := re.search(r"video\s*(\d+)", c, re.IGNORECASE))]
     return max(nums) + 1 if nums else 1
 
-# --- 5. INTERFAZ FLET ---
+# --- 4. INTERFAZ FLET ---
 def main(page: ft.Page):
     page.title = "Clusiv Automation Hub"
     page.theme_mode = ft.ThemeMode.LIGHT
@@ -137,10 +135,9 @@ def main(page: ft.Page):
     config_actual = cargar_toda_config()
     ruta_base = [config_actual["ruta_proyectos"]]
 
-    # --- ELEMENTOS DE UI ---
+    # UI Elements
     input_id = ft.TextField(label="ID del Canal", expand=True)
     input_name = ft.TextField(label="Nombre del Canal", expand=True)
-    
     lista_canales_ui = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, height=400)
     log_ui = ft.Column(spacing=5)
     prg = ft.ProgressBar(width=400, visible=False, color=ft.Colors.GREEN_700)
@@ -169,7 +166,7 @@ def main(page: ft.Page):
                     content=ft.Row([
                         ft.Icon(ft.Icons.PLAY_CIRCLE_FILL, color=ft.Colors.RED_600, size=20),
                         ft.Column([ft.Text(ch[1], weight="bold", size=12), ft.Text(ch[0], size=9)], expand=True, spacing=0),
-                        ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_color=ft.Colors.RED_400, icon_size=18, on_click=lambda _, id=ch[0]: borrar_canal(id))
+                        ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_color=ft.Colors.RED_400, on_click=lambda _, id=ch[0]: borrar_canal(id))
                     ]),
                     padding=8, border=ft.border.all(1, ft.Colors.GREY_300), border_radius=8
                 )
@@ -183,100 +180,103 @@ def main(page: ft.Page):
 
     def agregar_canal(e):
         if input_id.value and input_name.value:
-            res, msg = agregar_canal_db(input_id.value, input_name.value, "General")
+            res, msg = agregar_canal_db(input_id.value, input_name.value)
             show_snack(msg, ft.Colors.GREEN if res else ft.Colors.RED)
             input_id.value = ""; input_name.value = ""
             refrescar_canales()
 
-    def guardar_prompt_event(e):
-        guardar_config(prompt=field_prompt.value)
-        show_snack("Prompt guardado", ft.Colors.BLUE)
-
-    # --- AUTOMATIZACIÓN DE CHAGPT (LÓGICA EXTRAÍDA) ---
-    def automatizar_chatgpt(prompt_final):
-        # 1. Copiar al portapapeles
+    # --- AUTOMATIZACIÓN DE CHATGPT ---
+    def abrir_y_pegar_chatgpt(prompt_final):
+        # 1. Copiar prompt
         page.set_clipboard(prompt_final)
         
-        # 2. Buscar ventana de ChatGPT
-        windows = [w for w in gw.getAllWindows() if "ChatGPT" in w.title]
-        
-        if not windows:
-            # Si no está abierta, intentamos abrir el navegador
+        # 2. Abrir Aplicación
+        if os.path.exists(PATH_CHATGPT):
+            os.startfile(PATH_CHATGPT)
+        else:
             webbrowser.open("https://chatgpt.com")
-            time.sleep(6) # Esperar a que cargue la web
+        
+        # 3. Esperar a que la ventana de ChatGPT esté activa
+        ventana_encontrada = None
+        for _ in range(15):
+            time.sleep(1)
             windows = [w for w in gw.getAllWindows() if "ChatGPT" in w.title]
-
-        if windows:
+            if windows:
+                ventana_encontrada = windows[0]
+                break
+        
+        if ventana_encontrada:
             try:
-                w = windows[0]
-                w.activate()
-                time.sleep(1) # Pequeña pausa para asegurar foco
-                pyautogui.hotkey('ctrl', 'v') # Pegar
+                ventana_encontrada.activate()
+                time.sleep(2) # Espera a que cargue la interfaz
+                pyautogui.hotkey('ctrl', 'v')
                 time.sleep(0.5)
-                pyautogui.press('enter') # Enviar
-            except Exception as e:
-                print(f"Error en automatización: {e}")
+                pyautogui.press('enter')
+                return True
+            except: pass
+        return False
 
-    # --- FLUJO AUTOMÁTICO ---
+    # --- FLUJO PRINCIPAL ---
     def ejecutar_flujo_completo(e):
         if not ruta_base[0]:
-            show_snack("Primero selecciona una ruta base", ft.Colors.RED); return
+            show_snack("Selecciona una ruta de proyectos", ft.Colors.RED); return
         if not YOUTUBE_API_KEY:
-            show_snack("Falta API KEY en el archivo .env", ft.Colors.RED); return
+            show_snack("Falta API KEY en .env", ft.Colors.RED); return
             
         log_ui.controls.clear()
-        log_ui.controls.append(ft.Text("🚀 Iniciando flujo automático...", italic=True))
+        log_ui.controls.append(ft.Text("🚀 Iniciando flujo completo...", italic=True))
         prg.visible = True
         page.update()
 
-        # Usamos threading para no congelar la UI de Flet
-        def proceso():
+        def proceso_hilo():
             canales = obtener_canales_db()
-            todos_los_ganadores = []
+            ganadores_totales = []
 
+            # Analizar canales
             for ch_id, ch_name, _ in canales:
                 log_ui.controls.append(ft.Text(f"Analizando: {ch_name}...", size=12))
                 page.update()
-                
                 data = analizar_rendimiento_canal(ch_id)
                 if data and data['ganadores']:
-                    mejor_del_canal = data['ganadores'][0]
-                    mejor_del_canal['channel_name'] = ch_name
-                    todos_los_ganadores.append(mejor_del_canal)
+                    v = data['ganadores'][0]
+                    v['ch_name'] = ch_name
+                    ganadores_totales.append(v)
 
-            if not todos_los_ganadores:
-                log_ui.controls.append(ft.Text("❌ Sin videos virales nuevos.", color=ft.Colors.RED))
+            if not ganadores_totales:
+                log_ui.controls.append(ft.Text("❌ No se encontraron videos ganadores.", color=ft.Colors.RED))
                 prg.visible = False
                 page.update()
                 return
 
-            ganador_supremo = max(todos_los_ganadores, key=lambda x: x['views'])
-            titulo = ganador_supremo['title']
+            # Elegir el mejor
+            mejor = max(ganadores_totales, key=lambda x: x['views'])
+            titulo = mejor['title']
             
+            # Crear Proyecto
             num = obtener_siguiente_num(ruta_base[0])
             path = os.path.join(ruta_base[0], f"video {num}")
-            
             try:
-                os.makedirs(path, exist_ok=True)
                 os.makedirs(os.path.join(path, "assets"), exist_ok=True)
                 os.makedirs(os.path.join(path, "images"), exist_ok=True)
+                open(os.path.join(path, "scenes.txt"), "w", encoding="utf-8").close()
+                open(os.path.join(path, "scenes with duration.txt"), "w", encoding="utf-8").close()
                 
-                with open(os.path.join(path, "scenes.txt"), "w", encoding="utf-8") as f: pass
-                with open(os.path.join(path, "scenes with duration.txt"), "w", encoding="utf-8") as f: pass
-                
+                # Crear Prompt
                 prompt_final = field_prompt.value.replace("[REF_TITLE]", titulo)
                 with open(os.path.join(path, "PROMPT_IA.txt"), "w", encoding="utf-8") as f:
                     f.write(prompt_final)
                 
-                # --- NUEVA ACCIÓN: AUTOMATIZAR CHATGPT ---
-                log_ui.controls.append(ft.Text("🤖 Enviando a ChatGPT...", color=ft.Colors.BLUE))
+                # Ejecutar ChatGPT
+                log_ui.controls.append(ft.Text("🌐 Lanzando ChatGPT App...", color=ft.Colors.BLUE))
                 page.update()
-                automatizar_chatgpt(prompt_final)
-
-                log_ui.controls.append(ft.Divider())
-                log_ui.controls.append(ft.Text(f"✅ ¡ÉXITO! Proyecto: video {num}", weight="bold", color=ft.Colors.GREEN_700))
-                log_ui.controls.append(ft.Text(f"Título: {titulo}", size=12))
                 
+                exito_chat = abrir_y_pegar_chatgpt(prompt_final)
+                
+                log_ui.controls.append(ft.Divider())
+                log_ui.controls.append(ft.Text(f"✅ ¡LISTO! video {num} creado.", weight="bold", color=ft.Colors.GREEN_700))
+                if not exito_chat:
+                    log_ui.controls.append(ft.Text("⚠ Se creó la carpeta pero ChatGPT no respondió.", color=ft.Colors.ORANGE))
+
             except Exception as ex:
                 log_ui.controls.append(ft.Text(f"Error: {str(ex)}", color=ft.Colors.RED))
             
@@ -284,71 +284,41 @@ def main(page: ft.Page):
             txt_proximo.value = f"Próximo Proyecto: video {obtener_siguiente_num(ruta_base[0])}"
             page.update()
 
-        threading.Thread(target=proceso).start()
+        threading.Thread(target=proceso_hilo).start()
 
-    # --- DISEÑO UI ---
-    tile_gestion = ft.Card(
-        col={"md": 4},
-        content=ft.Container(padding=20, content=ft.Column([
-            ft.Row([ft.Icon(ft.Icons.PEOPLE_ALT), ft.Text("CANALES", weight="bold")]),
-            ft.Row([input_id, input_name]),
-            ft.ElevatedButton("Agregar", icon=ft.Icons.ADD, on_click=agregar_canal, width=1000, bgcolor=ft.Colors.BLUE_800, color="white"),
-            ft.Divider(),
-            lista_canales_ui
-        ]))
-    )
+    # --- UI LAYOUT ---
+    tile_gestion = ft.Card(col={"md": 4}, content=ft.Container(padding=20, content=ft.Column([
+        ft.Row([ft.Icon(ft.Icons.PEOPLE_ALT), ft.Text("CANALES", weight="bold")]),
+        ft.Row([input_id, input_name]),
+        ft.ElevatedButton("Agregar", icon=ft.Icons.ADD, on_click=agregar_canal, width=1000, bgcolor=ft.Colors.BLUE_800, color="white"),
+        ft.Divider(),
+        lista_canales_ui
+    ])))
 
-    tile_flujo = ft.Card(
-        col={"md": 4},
-        content=ft.Container(padding=20, content=ft.Column([
-            ft.Row([ft.Icon(ft.Icons.BOLT, color=ft.Colors.AMBER_700), ft.Text("AUTOMATIZACIÓN", weight="bold")]),
-            ft.Text("Analiza canales, crea carpetas y envía el prompt a ChatGPT con un clic.", size=12, color=ft.Colors.GREY_700),
-            ft.ElevatedButton(
-                "EJECUTAR FLUJO COMPLETO", 
-                icon=ft.Icons.AUTO_AWESOME, 
-                on_click=ejecutar_flujo_completo, 
-                bgcolor=ft.Colors.GREEN_700, 
-                color="white", 
-                height=50,
-                width=1000
-            ),
-            prg,
-            ft.Divider(),
-            ft.Text("LOG DE ACTIVIDAD:", size=10, weight="bold"),
-            log_ui
-        ]))
-    )
+    tile_flujo = ft.Card(col={"md": 4}, content=ft.Container(padding=20, content=ft.Column([
+        ft.Row([ft.Icon(ft.Icons.BOLT, color=ft.Colors.AMBER_700), ft.Text("AUTOMATIZACIÓN", weight="bold")]),
+        ft.ElevatedButton("EJECUTAR FLUJO COMPLETO", icon=ft.Icons.AUTO_AWESOME, on_click=ejecutar_flujo_completo, bgcolor=ft.Colors.GREEN_700, color="white", height=50, width=1000),
+        prg,
+        ft.Divider(),
+        log_ui
+    ])))
 
-    tile_config = ft.Card(
-        col={"md": 4},
-        content=ft.Container(padding=20, content=ft.Column([
-            ft.Row([ft.Icon(ft.Icons.SETTINGS), ft.Text("CONFIGURACIÓN", weight="bold")]),
-            txt_proximo,
-            ft.ElevatedButton("Ruta de Proyectos", icon=ft.Icons.FOLDER_OPEN, on_click=lambda _: picker.get_directory_path()),
-            ft.Divider(),
-            field_prompt,
-            ft.ElevatedButton("Guardar Prompt Template", icon=ft.Icons.SAVE, on_click=guardar_prompt_event, width=1000)
-        ]))
-    )
+    tile_config = ft.Card(col={"md": 4}, content=ft.Container(padding=20, content=ft.Column([
+        ft.Row([ft.Icon(ft.Icons.SETTINGS), ft.Text("CONFIGURACIÓN", weight="bold")]),
+        txt_proximo,
+        ft.ElevatedButton("Ruta de Proyectos", icon=ft.Icons.FOLDER_OPEN, on_click=lambda _: picker.get_directory_path()),
+        ft.Divider(),
+        field_prompt,
+        ft.ElevatedButton("Guardar Prompt", on_click=lambda _: guardar_config(prompt=field_prompt.value), width=1000)
+    ])))
 
-    def on_folder(e: ft.FilePickerResultEvent):
-        if e.path:
-            ruta_base[0] = e.path
-            guardar_config(ruta=e.path)
-            txt_proximo.value = f"Próximo Proyecto: video {obtener_siguiente_num(e.path)}"
-            show_snack("Ruta guardada"); page.update()
-
-    picker = ft.FilePicker(on_result=on_folder); page.overlay.append(picker)
+    picker = ft.FilePicker(on_result=lambda e: (guardar_config(ruta=e.path), page.update()) if e.path else None)
+    page.overlay.append(picker)
 
     page.add(
-        ft.Row([
-            ft.Text("Clusiv", size=32, weight="bold", color=ft.Colors.BLUE_800),
-            ft.Text("Automation Hub", size=32, weight="light")
-        ], alignment=ft.MainAxisAlignment.CENTER),
-        ft.ResponsiveRow([tile_gestion, tile_flujo, tile_config], run_spacing=20)
+        ft.Row([ft.Text("Clusiv", size=32, weight="bold", color=ft.Colors.BLUE_800), ft.Text("Automation", size=32)], alignment=ft.MainAxisAlignment.CENTER),
+        ft.ResponsiveRow([tile_gestion, tile_flujo, tile_config])
     )
-    
-    txt_proximo.value = f"Próximo Proyecto: video {obtener_siguiente_num(ruta_base[0])}"
     refrescar_canales()
 
 if __name__ == "__main__":
