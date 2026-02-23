@@ -8,6 +8,7 @@ import threading
 import pyautogui
 import pygetwindow as gw
 import webbrowser
+import pyperclip
 from datetime import datetime, timedelta, timezone
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
@@ -16,12 +17,13 @@ from dotenv import load_dotenv
 load_dotenv()
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
 
-# Ruta específica proporcionada por el usuario
+# Ruta de la aplicación ChatGPT (Chrome App)
 PATH_CHATGPT = r"C:\Users\carlo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Aplicaciones de Chrome\ChatGPT.lnk"
 
 CONFIG_FILE = "config_automatizacion.json"
 DATABASE_FILE = "channels.db"
 
+# PROMPT CON ESTRUCTURA DE EXTRACCIÓN
 PROMPT_DEFAULT = """**Act as a senior YouTube Growth Strategist and expert Copywriter.**
 
 I have a specific video title that performed exceptionally well on my channel. I need you to reverse-engineer its success and use those insights to create better, high-CTR variations in English.
@@ -35,14 +37,17 @@ I have a specific video title that performed exceptionally well on my channel. I
 Briefly analyze **why** this title worked effectively. Identify the psychological triggers (e.g., fear, urgency, curiosity, high stakes) and the power keywords used. Explain the "hook" mechanism behind it.
 
 **STEP 2: The Proposal**
-Based on your analysis, generate **5 new high-performing title variations in ENGLISH**.
+Based on your analysis, generate **1 new high-performing title variation in ENGLISH**.
 
-**Guidelines for the new titles:**
+**CRITICAL INSTRUCTION FOR STEP 2:**
+You must provide the title strictly inside this structure so I can parse it:
+[FINAL_TITLE: Put the generated title here]
+
+**Guidelines for the new title:**
 1.  **Language:** All titles must be in **English**.
 2.  **Psychology:** Leverage the "Curiosity Gap" or "Urgency" triggers.
 3.  **Structure:** Use "Front-loading" (put the most impactful words at the beginning).
-4.  **Length:** Keep them concise (optimized for mobile).
-5.  **Variety:** Provide different angles (e.g., a warning, a question, a scenario)."""
+4.  **Length:** Keep them concise (optimized for mobile)."""
 
 # --- 2. GESTIÓN DE CONFIGURACIÓN Y BASE DE DATOS ---
 def guardar_config(ruta=None, prompt=None):
@@ -187,16 +192,12 @@ def main(page: ft.Page):
 
     # --- AUTOMATIZACIÓN DE CHATGPT ---
     def abrir_y_pegar_chatgpt(prompt_final):
-        # 1. Copiar prompt
-        page.set_clipboard(prompt_final)
-        
-        # 2. Abrir Aplicación
+        pyperclip.copy(prompt_final)
         if os.path.exists(PATH_CHATGPT):
             os.startfile(PATH_CHATGPT)
         else:
             webbrowser.open("https://chatgpt.com")
         
-        # 3. Esperar a que la ventana de ChatGPT esté activa
         ventana_encontrada = None
         for _ in range(15):
             time.sleep(1)
@@ -208,13 +209,56 @@ def main(page: ft.Page):
         if ventana_encontrada:
             try:
                 ventana_encontrada.activate()
-                time.sleep(2) # Espera a que cargue la interfaz
+                time.sleep(2) 
                 pyautogui.hotkey('ctrl', 'v')
                 time.sleep(0.5)
                 pyautogui.press('enter')
                 return True
             except: pass
         return False
+
+    def extraer_solo_el_titulo(texto_completo):
+        """Usa Regex para extraer el contenido de [FINAL_TITLE: ...] evitando el prompt"""
+        patron = r"\[FINAL_TITLE:\s*(.*?)\]"
+        # Buscamos TODOS los matches
+        matches = re.findall(patron, texto_completo, re.IGNORECASE | re.DOTALL)
+        
+        # Filtramos los que sean exactamente el placeholder del prompt
+        titulos_reales = [
+            m.strip() for m in matches 
+            if "Put the generated title here" not in m
+        ]
+        
+        if titulos_reales:
+            # Retornamos el ÚLTIMO encontrado (el más reciente en el chat)
+            return titulos_reales[-1]
+        return None
+
+    def extraer_respuesta_automatica():
+        try:
+            windows = [w for w in gw.getAllWindows() if "ChatGPT" in w.title]
+            if not windows: return None
+            
+            ventana = windows[0]
+            ventana.activate()
+            time.sleep(1.5)
+
+            # Clic en el centro para asegurar foco
+            ancho, alto = ventana.size
+            centro_x = ventana.left + (ancho // 2)
+            centro_y = ventana.top + (alto // 2)
+            pyautogui.click(centro_x, centro_y)
+            time.sleep(0.5)
+
+            # Seleccionar todo y Copiar
+            pyautogui.hotkey('ctrl', 'a')
+            time.sleep(0.5)
+            pyautogui.hotkey('ctrl', 'c')
+            time.sleep(1.5)
+
+            return pyperclip.paste()
+        except:
+            return None
 
     # --- FLUJO PRINCIPAL ---
     def ejecutar_flujo_completo(e):
@@ -232,7 +276,6 @@ def main(page: ft.Page):
             canales = obtener_canales_db()
             ganadores_totales = []
 
-            # Analizar canales
             for ch_id, ch_name, _ in canales:
                 log_ui.controls.append(ft.Text(f"Analizando: {ch_name}...", size=12))
                 page.update()
@@ -248,34 +291,53 @@ def main(page: ft.Page):
                 page.update()
                 return
 
-            # Elegir el mejor
             mejor = max(ganadores_totales, key=lambda x: x['views'])
-            titulo = mejor['title']
+            titulo_ref = mejor['title']
             
-            # Crear Proyecto
             num = obtener_siguiente_num(ruta_base[0])
             path = os.path.join(ruta_base[0], f"video {num}")
+            
             try:
                 os.makedirs(os.path.join(path, "assets"), exist_ok=True)
                 os.makedirs(os.path.join(path, "images"), exist_ok=True)
                 open(os.path.join(path, "scenes.txt"), "w", encoding="utf-8").close()
                 open(os.path.join(path, "scenes with duration.txt"), "w", encoding="utf-8").close()
                 
-                # Crear Prompt
-                prompt_final = field_prompt.value.replace("[REF_TITLE]", titulo)
+                prompt_final = field_prompt.value.replace("[REF_TITLE]", titulo_ref)
                 with open(os.path.join(path, "PROMPT_IA.txt"), "w", encoding="utf-8") as f:
                     f.write(prompt_final)
                 
-                # Ejecutar ChatGPT
-                log_ui.controls.append(ft.Text("🌐 Lanzando ChatGPT App...", color=ft.Colors.BLUE))
+                log_ui.controls.append(ft.Text(f"🌐 Enviando prompt a ChatGPT...", color=ft.Colors.BLUE))
                 page.update()
                 
-                exito_chat = abrir_y_pegar_chatgpt(prompt_final)
-                
+                if abrir_y_pegar_chatgpt(prompt_final):
+                    espera = 30
+                    log_ui.controls.append(ft.Text(f"⏳ Esperando {espera}s generación...", italic=True))
+                    page.update()
+                    time.sleep(espera)
+
+                    log_ui.controls.append(ft.Text("📋 Extrayendo título final...", color=ft.Colors.AMBER_800))
+                    page.update()
+                    
+                    texto_copiado = extraer_respuesta_automatica()
+                    
+                    if texto_copiado:
+                        titulo_final = extraer_solo_el_titulo(texto_copiado)
+                        
+                        if titulo_final:
+                            # Guardar solo el título limpio
+                            with open(os.path.join(path, "TITULO_FINAL.txt"), "w", encoding="utf-8") as f:
+                                f.write(titulo_final)
+                            log_ui.controls.append(ft.Text(f"🎯 Título detectado: {titulo_final}", color=ft.Colors.GREEN_700, weight="bold"))
+                        else:
+                            with open(os.path.join(path, "RESPUESTA_RAW.txt"), "w", encoding="utf-8") as f:
+                                f.write(texto_copiado)
+                            log_ui.controls.append(ft.Text("⚠ No se encontró el título real. Se guardó Raw.", color=ft.Colors.ORANGE))
+                    else:
+                        log_ui.controls.append(ft.Text("❌ Error: Portapapeles vacío.", color=ft.Colors.RED))
+
                 log_ui.controls.append(ft.Divider())
-                log_ui.controls.append(ft.Text(f"✅ ¡LISTO! video {num} creado.", weight="bold", color=ft.Colors.GREEN_700))
-                if not exito_chat:
-                    log_ui.controls.append(ft.Text("⚠ Se creó la carpeta pero ChatGPT no respondió.", color=ft.Colors.ORANGE))
+                log_ui.controls.append(ft.Text(f"✅ FINALIZADO: video {num}", weight="bold", color=ft.Colors.GREEN_800))
 
             except Exception as ex:
                 log_ui.controls.append(ft.Text(f"Error: {str(ex)}", color=ft.Colors.RED))
