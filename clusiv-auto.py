@@ -49,11 +49,65 @@ You must provide the title strictly inside this structure so I can parse it:
 3.  **Structure:** Use "Front-loading" (put the most impactful words at the beginning).
 4.  **Length:** Keep them concise (optimized for mobile)."""
 
+PROMPT_INVESTIGACION_DEFAULT = """I want you to follow these steps.
+Step 1:
+Based on the following title for a youtube video, generate an outline with 5 key questions that explore its central theme. The outline and questions should be structured in a way that keeps people's attention, as it will be used to create a video script. For this reason, it is necessary to begin with the most important and pressing question for the audience, followed by questions that help dive deeper into the content.
+For each of these questions, conduct research using reputable web sources that provide verified information, such as:
+
+nytimes.com
+
+washingtonpost.com
+
+npr.org
+
+bbc.com
+
+axios.com
+
+apnews.com
+
+bloomberg.com
+
+foxnews.com
+
+news.yahoo.com
+
+nbc.com
+
+reuters.com
+
+cnbc.com
+
+wsj.com
+
+foxbusiness.com
+
+ft.com
+
+economist.com
+
+marketwatch.com
+
+investing.com
+
+edition.cnn.com
+
+politico.com
+
+usnews.com
+
+propublica.org
+You can also include scientific papers, indexed journals, or official U.S. government websites. Avoid social media, youtube, unverified blogs, and low-credibility content. Cross-check at least three reliable sources to confirm each relevant fact.
+
+Title for a YouTube video:
+[TITULO]"""
+
 # --- 2. GESTIÓN DE CONFIGURACIÓN Y BASE DE DATOS ---
-def guardar_config(ruta=None, prompt=None):
+def guardar_config(ruta=None, prompt=None, prompt_investigacion=None):
     config = cargar_toda_config()
     if ruta is not None: config["ruta_proyectos"] = ruta
     if prompt is not None: config["prompt_template"] = prompt
+    if prompt_investigacion is not None: config["prompt_investigacion"] = prompt_investigacion
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=4)
 
@@ -63,8 +117,9 @@ def cargar_toda_config():
             conf = json.load(f)
             if "ruta_proyectos" not in conf: conf["ruta_proyectos"] = ""
             if "prompt_template" not in conf: conf["prompt_template"] = PROMPT_DEFAULT
+            if "prompt_investigacion" not in conf: conf["prompt_investigacion"] = PROMPT_INVESTIGACION_DEFAULT
             return conf
-    return {"ruta_proyectos": "", "prompt_template": PROMPT_DEFAULT}
+    return {"ruta_proyectos": "", "prompt_template": PROMPT_DEFAULT, "prompt_investigacion": PROMPT_INVESTIGACION_DEFAULT}
 
 def init_db():
     conn = sqlite3.connect(DATABASE_FILE)
@@ -154,6 +209,16 @@ def main(page: ft.Page):
         min_lines=8,
         max_lines=10,
         value=config_actual["prompt_template"],
+        text_size=12,
+        bgcolor=ft.Colors.WHITE
+    )
+
+    field_prompt_investigacion = ft.TextField(
+        label="Prompt Investigación (usa [TITULO])",
+        multiline=True,
+        min_lines=8,
+        max_lines=10,
+        value=config_actual["prompt_investigacion"],
         text_size=12,
         bgcolor=ft.Colors.WHITE
     )
@@ -329,6 +394,40 @@ def main(page: ft.Page):
                             with open(os.path.join(path, "TITULO_FINAL.txt"), "w", encoding="utf-8") as f:
                                 f.write(titulo_final)
                             log_ui.controls.append(ft.Text(f"🎯 Título detectado: {titulo_final}", color=ft.Colors.GREEN_700, weight="bold"))
+                            
+                            # --- PASO 2: Enviar prompt de investigación ---
+                            log_ui.controls.append(ft.Text("📝 Preparando prompt de investigación...", color=ft.Colors.PURPLE))
+                            page.update()
+                            time.sleep(3)
+                            
+                            prompt_invest = field_prompt_investigacion.value.replace("[TITULO]", titulo_final)
+                            with open(os.path.join(path, "PROMPT_INVESTIGACION.txt"), "w", encoding="utf-8") as f:
+                                f.write(prompt_invest)
+                            
+                            log_ui.controls.append(ft.Text(f"🌐 Enviando prompt de investigación a ChatGPT...", color=ft.Colors.BLUE))
+                            page.update()
+                            
+                            if abrir_y_pegar_chatgpt(prompt_invest):
+                                espera_invest = 60
+                                log_ui.controls.append(ft.Text(f"⏳ Esperando {espera_invest}s generación de investigación...", italic=True))
+                                page.update()
+                                time.sleep(espera_invest)
+                                
+                                log_ui.controls.append(ft.Text("📋 Extrayendo respuesta de investigación...", color=ft.Colors.AMBER_800))
+                                page.update()
+                                
+                                texto_investigacion = extraer_respuesta_automatica()
+                                
+                                if texto_investigacion:
+                                    with open(os.path.join(path, "RESPUESTA_INVESTIGACION.txt"), "w", encoding="utf-8") as f:
+                                        f.write(texto_investigacion)
+                                    log_ui.controls.append(ft.Text("✅ Investigación guardada en RESPUESTA_INVESTIGACION.txt", color=ft.Colors.GREEN_700, weight="bold"))
+                                else:
+                                    log_ui.controls.append(ft.Text("❌ Error: No se pudo extraer la investigación.", color=ft.Colors.RED))
+                            else:
+                                log_ui.controls.append(ft.Text("❌ Error: No se pudo enviar el prompt de investigación.", color=ft.Colors.RED))
+                            page.update()
+                            
                         else:
                             with open(os.path.join(path, "RESPUESTA_RAW.txt"), "w", encoding="utf-8") as f:
                                 f.write(texto_copiado)
@@ -371,7 +470,10 @@ def main(page: ft.Page):
         ft.ElevatedButton("Ruta de Proyectos", icon=ft.Icons.FOLDER_OPEN, on_click=lambda _: picker.get_directory_path()),
         ft.Divider(),
         field_prompt,
-        ft.ElevatedButton("Guardar Prompt", on_click=lambda _: guardar_config(prompt=field_prompt.value), width=1000)
+        ft.ElevatedButton("Guardar Prompt Título", on_click=lambda _: guardar_config(prompt=field_prompt.value), width=1000),
+        ft.Divider(),
+        field_prompt_investigacion,
+        ft.ElevatedButton("Guardar Prompt Investigación", on_click=lambda _: guardar_config(prompt_investigacion=field_prompt_investigacion.value), width=1000)
     ])))
 
     picker = ft.FilePicker(on_result=lambda e: (guardar_config(ruta=e.path), page.update()) if e.path else None)
