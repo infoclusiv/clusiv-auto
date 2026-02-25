@@ -23,7 +23,7 @@ PATH_CHATGPT = r"C:\Users\carlo\AppData\Roaming\Microsoft\Windows\Start Menu\Pro
 CONFIG_FILE = "config_automatizacion.json"
 DATABASE_FILE = "channels.db"
 
-# PROMPT CON ESTRUCTURA DE EXTRACCIÓN
+# PROMPTS POR DEFECTO
 PROMPT_DEFAULT = """**Act as a senior YouTube Growth Strategist and expert Copywriter.**
 
 I have a specific video title that performed exceptionally well on my channel. I need you to reverse-engineer its success and use those insights to create better, high-CTR variations in English.
@@ -102,24 +102,72 @@ You can also include scientific papers, indexed journals, or official U.S. gover
 Title for a YouTube video:
 [TITULO]"""
 
+PROMPTS_DEFAULT = [
+    {
+        "nombre": "Generar Título",
+        "texto": PROMPT_DEFAULT,
+        "modo": "nueva",
+        "espera_segundos": 30,
+        "habilitado": True,
+        "post_accion": "extraer_titulo",
+        "archivo_salida": "TITULO_FINAL.txt"
+    },
+    {
+        "nombre": "Investigación (5 Key Questions)",
+        "texto": PROMPT_INVESTIGACION_DEFAULT,
+        "modo": "nueva",
+        "espera_segundos": 60,
+        "habilitado": True,
+        "post_accion": "guardar_respuesta",
+        "archivo_salida": "RESPUESTA_INVESTIGACION.txt"
+    }
+]
+
 # --- 2. GESTIÓN DE CONFIGURACIÓN Y BASE DE DATOS ---
-def guardar_config(ruta=None, prompt=None, prompt_investigacion=None):
+def guardar_config(ruta=None, prompts=None):
     config = cargar_toda_config()
-    if ruta is not None: config["ruta_proyectos"] = ruta
-    if prompt is not None: config["prompt_template"] = prompt
-    if prompt_investigacion is not None: config["prompt_investigacion"] = prompt_investigacion
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=4)
+    if ruta is not None:
+        config["ruta_proyectos"] = ruta
+    if prompts is not None:
+        config["prompts"] = prompts
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
 
 def cargar_toda_config():
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             conf = json.load(f)
-            if "ruta_proyectos" not in conf: conf["ruta_proyectos"] = ""
-            if "prompt_template" not in conf: conf["prompt_template"] = PROMPT_DEFAULT
-            if "prompt_investigacion" not in conf: conf["prompt_investigacion"] = PROMPT_INVESTIGACION_DEFAULT
+            if "ruta_proyectos" not in conf:
+                conf["ruta_proyectos"] = ""
+            # Migración automática del formato legacy
+            if "prompts" not in conf:
+                prompts = []
+                pt = conf.pop("prompt_template", PROMPT_DEFAULT)
+                pi = conf.pop("prompt_investigacion", PROMPT_INVESTIGACION_DEFAULT)
+                prompts.append({
+                    "nombre": "Generar Título",
+                    "texto": pt,
+                    "modo": "nueva",
+                    "espera_segundos": 30,
+                    "habilitado": True,
+                    "post_accion": "extraer_titulo",
+                    "archivo_salida": "TITULO_FINAL.txt"
+                })
+                prompts.append({
+                    "nombre": "Investigación (5 Key Questions)",
+                    "texto": pi,
+                    "modo": "nueva",
+                    "espera_segundos": 60,
+                    "habilitado": True,
+                    "post_accion": "guardar_respuesta",
+                    "archivo_salida": "RESPUESTA_INVESTIGACION.txt"
+                })
+                conf["prompts"] = prompts
+                # Guardar migración
+                with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
+                    json.dump(conf, fw, indent=4, ensure_ascii=False)
             return conf
-    return {"ruta_proyectos": "", "prompt_template": PROMPT_DEFAULT, "prompt_investigacion": PROMPT_INVESTIGACION_DEFAULT}
+    return {"ruta_proyectos": "", "prompts": list(PROMPTS_DEFAULT)}
 
 def init_db():
     conn = sqlite3.connect(DATABASE_FILE)
@@ -194,6 +242,7 @@ def main(page: ft.Page):
     init_db()
     config_actual = cargar_toda_config()
     ruta_base = [config_actual["ruta_proyectos"]]
+    prompts_lista = config_actual["prompts"]
 
     # UI Elements
     input_id = ft.TextField(label="ID del Canal", expand=True)
@@ -203,31 +252,211 @@ def main(page: ft.Page):
     prg = ft.ProgressBar(width=400, visible=False, color=ft.Colors.GREEN_700)
     txt_proximo = ft.Text(size=14, weight="bold", color=ft.Colors.BLUE_GREY_700)
 
-    field_prompt = ft.TextField(
-        label="Prompt Template (usa [REF_TITLE])",
-        multiline=True,
-        min_lines=8,
-        max_lines=10,
-        value=config_actual["prompt_template"],
-        text_size=12,
-        bgcolor=ft.Colors.WHITE
-    )
-
-    field_prompt_investigacion = ft.TextField(
-        label="Prompt Investigación (usa [TITULO])",
-        multiline=True,
-        min_lines=8,
-        max_lines=10,
-        value=config_actual["prompt_investigacion"],
-        text_size=12,
-        bgcolor=ft.Colors.WHITE
-    )
+    # Prompt Manager UI container
+    prompts_ui = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO)
 
     def show_snack(msg, color=ft.Colors.GREEN):
         page.overlay.append(ft.SnackBar(content=ft.Text(msg), bgcolor=color))
         page.overlay[-1].open = True
         page.update()
 
+    # --- PROMPT MANAGER ---
+    def obtener_pipeline_visual(p):
+        """Genera el pipeline visual de un prompt."""
+        icono_modo = "🆕 Nueva ventana" if p.get("modo") == "nueva" else "📌 Ventana activa"
+        espera = p.get("espera_segundos", 30)
+        accion = p.get("post_accion", "solo_enviar")
+        archivo = p.get("archivo_salida", "")
+        
+        partes = [f"📤 Enviar ({icono_modo})", f"⏳ {espera}s"]
+        
+        if accion == "extraer_titulo":
+            partes.append("📥 Extraer [FINAL_TITLE]")
+            if archivo:
+                partes.append(f"💾 {archivo}")
+        elif accion == "guardar_respuesta":
+            partes.append("📥 Extraer respuesta")
+            if archivo:
+                partes.append(f"💾 {archivo}")
+        else:
+            partes.append("(solo enviar)")
+        
+        return " → ".join(partes)
+
+    def guardar_prompts():
+        """Guarda la lista de prompts en el config."""
+        guardar_config(prompts=prompts_lista)
+
+    def refrescar_prompts():
+        """Reconstruye la UI del prompt manager."""
+        prompts_ui.controls.clear()
+        for idx, p in enumerate(prompts_lista):
+            nombre = p.get("nombre", f"Prompt {idx+1}")
+            habilitado = p.get("habilitado", True)
+            pipeline = obtener_pipeline_visual(p)
+            
+            # Tarjeta de cada prompt
+            card = ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Switch(
+                            value=habilitado,
+                            active_color=ft.Colors.GREEN_600,
+                            on_change=lambda e, i=idx: toggle_prompt(i, e.control.value),
+                        ),
+                        ft.Text(nombre, weight="bold", size=14, expand=True,
+                                color=ft.Colors.BLACK if habilitado else ft.Colors.GREY_500),
+                        ft.IconButton(
+                            ft.Icons.EDIT_NOTE, icon_color=ft.Colors.BLUE_600, tooltip="Editar",
+                            on_click=lambda _, i=idx: abrir_editor_prompt(i)
+                        ),
+                        ft.IconButton(
+                            ft.Icons.ARROW_UPWARD, icon_color=ft.Colors.GREY_600, tooltip="Subir",
+                            on_click=lambda _, i=idx: mover_prompt(i, -1),
+                            disabled=(idx == 0)
+                        ),
+                        ft.IconButton(
+                            ft.Icons.ARROW_DOWNWARD, icon_color=ft.Colors.GREY_600, tooltip="Bajar",
+                            on_click=lambda _, i=idx: mover_prompt(i, 1),
+                            disabled=(idx == len(prompts_lista) - 1)
+                        ),
+                        ft.IconButton(
+                            ft.Icons.DELETE_OUTLINE, icon_color=ft.Colors.RED_400, tooltip="Eliminar",
+                            on_click=lambda _, i=idx: eliminar_prompt(i)
+                        ),
+                    ], alignment=ft.MainAxisAlignment.START),
+                    ft.Container(
+                        content=ft.Text(pipeline, size=11, color=ft.Colors.BLUE_GREY_600, italic=True),
+                        padding=ft.padding.only(left=50)
+                    ),
+                ], spacing=2),
+                padding=12,
+                border=ft.border.all(1, ft.Colors.GREEN_300 if habilitado else ft.Colors.GREY_300),
+                border_radius=8,
+                bgcolor=ft.Colors.WHITE if habilitado else ft.Colors.GREY_100,
+            )
+            prompts_ui.controls.append(card)
+        page.update()
+
+    def toggle_prompt(idx, valor):
+        prompts_lista[idx]["habilitado"] = valor
+        guardar_prompts()
+        refrescar_prompts()
+
+    def mover_prompt(idx, direccion):
+        nuevo_idx = idx + direccion
+        if 0 <= nuevo_idx < len(prompts_lista):
+            prompts_lista[idx], prompts_lista[nuevo_idx] = prompts_lista[nuevo_idx], prompts_lista[idx]
+            guardar_prompts()
+            refrescar_prompts()
+
+    def eliminar_prompt(idx):
+        prompts_lista.pop(idx)
+        guardar_prompts()
+        refrescar_prompts()
+        show_snack("Prompt eliminado", ft.Colors.ORANGE)
+
+    def agregar_prompt_nuevo(e):
+        """Agrega un nuevo prompt vacío y abre el editor."""
+        nuevo = {
+            "nombre": f"Nuevo Prompt {len(prompts_lista) + 1}",
+            "texto": "",
+            "modo": "nueva",
+            "espera_segundos": 30,
+            "habilitado": True,
+            "post_accion": "solo_enviar",
+            "archivo_salida": ""
+        }
+        prompts_lista.append(nuevo)
+        guardar_prompts()
+        refrescar_prompts()
+        show_snack("Prompt agregado ✅", ft.Colors.GREEN)
+        # Abrir editor del nuevo prompt
+        abrir_editor_prompt(len(prompts_lista) - 1)
+
+    def abrir_editor_prompt(idx):
+        """Abre un diálogo para editar un prompt."""
+        p = prompts_lista[idx]
+        
+        f_nombre = ft.TextField(label="Nombre", value=p.get("nombre", ""), dense=True)
+        f_texto = ft.TextField(
+            label="Texto del prompt (usa [REF_TITLE] o [TITULO])",
+            value=p.get("texto", ""),
+            multiline=True, min_lines=6, max_lines=12, text_size=12
+        )
+        f_modo = ft.Dropdown(
+            label="Modo de ventana",
+            value=p.get("modo", "nueva"),
+            options=[
+                ft.dropdown.Option("nueva", "🆕 Nueva ventana"),
+                ft.dropdown.Option("activa", "📌 Ventana activa"),
+            ],
+            dense=True, width=250
+        )
+        f_espera = ft.TextField(
+            label="Espera (segundos)",
+            value=str(p.get("espera_segundos", 30)),
+            width=150, dense=True,
+            keyboard_type=ft.KeyboardType.NUMBER
+        )
+        f_post_accion = ft.Dropdown(
+            label="Post-Acción",
+            value=p.get("post_accion", "solo_enviar"),
+            options=[
+                ft.dropdown.Option("extraer_titulo", "📥 Extraer [FINAL_TITLE]"),
+                ft.dropdown.Option("guardar_respuesta", "📥 Guardar respuesta completa"),
+                ft.dropdown.Option("solo_enviar", "📤 Solo enviar"),
+            ],
+            dense=True, width=300
+        )
+        f_archivo = ft.TextField(
+            label="Archivo de salida", value=p.get("archivo_salida", ""),
+            dense=True, width=300
+        )
+
+        def cerrar_editor(e):
+            dlg.open = False
+            page.update()
+
+        def guardar_editor(e):
+            prompts_lista[idx]["nombre"] = f_nombre.value
+            prompts_lista[idx]["texto"] = f_texto.value
+            prompts_lista[idx]["modo"] = f_modo.value
+            try:
+                prompts_lista[idx]["espera_segundos"] = int(f_espera.value)
+            except ValueError:
+                prompts_lista[idx]["espera_segundos"] = 30
+            prompts_lista[idx]["post_accion"] = f_post_accion.value
+            prompts_lista[idx]["archivo_salida"] = f_archivo.value
+            guardar_prompts()
+            refrescar_prompts()
+            dlg.open = False
+            page.update()
+            show_snack(f"Prompt '{f_nombre.value}' guardado ✅")
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(f"Editar Prompt: {p.get('nombre', '')}"),
+            content=ft.Container(
+                width=550,
+                content=ft.Column([
+                    f_nombre,
+                    f_texto,
+                    ft.Row([f_modo, f_espera]),
+                    ft.Row([f_post_accion, f_archivo]),
+                ], spacing=10, scroll=ft.ScrollMode.AUTO, height=450),
+            ),
+            actions=[
+                ft.TextButton("Cancelar", on_click=cerrar_editor),
+                ft.ElevatedButton("Guardar", on_click=guardar_editor, bgcolor=ft.Colors.GREEN_700, color="white"),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        page.overlay.append(dlg)
+        dlg.open = True
+        page.update()
+
+    # --- CANALES ---
     def refrescar_canales():
         lista_canales_ui.controls.clear()
         for ch in obtener_canales_db():
@@ -256,12 +485,13 @@ def main(page: ft.Page):
             refrescar_canales()
 
     # --- AUTOMATIZACIÓN DE CHATGPT ---
-    def abrir_y_pegar_chatgpt(prompt_final):
+    def abrir_y_pegar_chatgpt(prompt_final, modo="nueva"):
         pyperclip.copy(prompt_final)
-        if os.path.exists(PATH_CHATGPT):
-            os.startfile(PATH_CHATGPT)
-        else:
-            webbrowser.open("https://chatgpt.com")
+        if modo == "nueva":
+            if os.path.exists(PATH_CHATGPT):
+                os.startfile(PATH_CHATGPT)
+            else:
+                webbrowser.open("https://chatgpt.com")
         
         ventana_encontrada = None
         for _ in range(15):
@@ -285,17 +515,12 @@ def main(page: ft.Page):
     def extraer_solo_el_titulo(texto_completo):
         """Usa Regex para extraer el contenido de [FINAL_TITLE: ...] evitando el prompt"""
         patron = r"\[FINAL_TITLE:\s*(.*?)\]"
-        # Buscamos TODOS los matches
         matches = re.findall(patron, texto_completo, re.IGNORECASE | re.DOTALL)
-        
-        # Filtramos los que sean exactamente el placeholder del prompt
         titulos_reales = [
             m.strip() for m in matches 
             if "Put the generated title here" not in m
         ]
-        
         if titulos_reales:
-            # Retornamos el ÚLTIMO encontrado (el más reciente en el chat)
             return titulos_reales[-1]
         return None
 
@@ -308,14 +533,12 @@ def main(page: ft.Page):
             ventana.activate()
             time.sleep(1.5)
 
-            # Clic en el centro para asegurar foco
             ancho, alto = ventana.size
             centro_x = ventana.left + (ancho // 2)
             centro_y = ventana.top + (alto // 2)
             pyautogui.click(centro_x, centro_y)
             time.sleep(0.5)
 
-            # Seleccionar todo y Copiar
             pyautogui.hotkey('ctrl', 'a')
             time.sleep(0.5)
             pyautogui.hotkey('ctrl', 'c')
@@ -325,12 +548,16 @@ def main(page: ft.Page):
         except:
             return None
 
-    # --- FLUJO PRINCIPAL ---
+    # --- FLUJO PRINCIPAL (basado en lista de prompts) ---
     def ejecutar_flujo_completo(e):
         if not ruta_base[0]:
             show_snack("Selecciona una ruta de proyectos", ft.Colors.RED); return
         if not YOUTUBE_API_KEY:
             show_snack("Falta API KEY en .env", ft.Colors.RED); return
+        
+        habilitados = [p for p in prompts_lista if p.get("habilitado", True)]
+        if not habilitados:
+            show_snack("No hay prompts habilitados", ft.Colors.RED); return
             
         log_ui.controls.clear()
         log_ui.controls.append(ft.Text("🚀 Iniciando flujo completo...", italic=True))
@@ -368,72 +595,76 @@ def main(page: ft.Page):
                 open(os.path.join(path, "scenes.txt"), "w", encoding="utf-8").close()
                 open(os.path.join(path, "scenes with duration.txt"), "w", encoding="utf-8").close()
                 
-                prompt_final = field_prompt.value.replace("[REF_TITLE]", titulo_ref)
-                with open(os.path.join(path, "PROMPT_IA.txt"), "w", encoding="utf-8") as f:
-                    f.write(prompt_final)
+                titulo_extraido = None  # Se llenará con el título del primer prompt que lo extraiga
                 
-                log_ui.controls.append(ft.Text(f"🌐 Enviando prompt a ChatGPT...", color=ft.Colors.BLUE))
-                page.update()
-                
-                if abrir_y_pegar_chatgpt(prompt_final):
-                    espera = 30
-                    log_ui.controls.append(ft.Text(f"⏳ Esperando {espera}s generación...", italic=True))
-                    page.update()
-                    time.sleep(espera)
-
-                    log_ui.controls.append(ft.Text("📋 Extrayendo título final...", color=ft.Colors.AMBER_800))
+                for idx, p in enumerate(habilitados):
+                    nombre_prompt = p.get("nombre", f"Prompt {idx+1}")
+                    post_accion = p.get("post_accion", "solo_enviar")
+                    modo = p.get("modo", "nueva")
+                    espera = p.get("espera_segundos", 30)
+                    archivo_salida = p.get("archivo_salida", "")
+                    
+                    # Preparar texto del prompt (reemplazar placeholders)
+                    texto_prompt = p.get("texto", "")
+                    texto_prompt = texto_prompt.replace("[REF_TITLE]", titulo_ref)
+                    if titulo_extraido:
+                        texto_prompt = texto_prompt.replace("[TITULO]", titulo_extraido)
+                    
+                    # Guardar prompt en archivo
+                    nombre_archivo_prompt = f"PROMPT_{idx+1}_{nombre_prompt.replace(' ', '_')}.txt"
+                    with open(os.path.join(path, nombre_archivo_prompt), "w", encoding="utf-8") as f:
+                        f.write(texto_prompt)
+                    
+                    log_ui.controls.append(ft.Text(f"🌐 [{idx+1}/{len(habilitados)}] Enviando: {nombre_prompt}...", color=ft.Colors.BLUE))
                     page.update()
                     
-                    texto_copiado = extraer_respuesta_automatica()
-                    
-                    if texto_copiado:
-                        titulo_final = extraer_solo_el_titulo(texto_copiado)
+                    if abrir_y_pegar_chatgpt(texto_prompt, modo=modo):
+                        log_ui.controls.append(ft.Text(f"⏳ Esperando {espera}s generación...", italic=True))
+                        page.update()
+                        time.sleep(espera)
                         
-                        if titulo_final:
-                            # Guardar solo el título limpio
-                            with open(os.path.join(path, "TITULO_FINAL.txt"), "w", encoding="utf-8") as f:
-                                f.write(titulo_final)
-                            log_ui.controls.append(ft.Text(f"🎯 Título detectado: {titulo_final}", color=ft.Colors.GREEN_700, weight="bold"))
-                            
-                            # --- PASO 2: Enviar prompt de investigación ---
-                            log_ui.controls.append(ft.Text("📝 Preparando prompt de investigación...", color=ft.Colors.PURPLE))
+                        # Post-acción
+                        if post_accion == "extraer_titulo":
+                            log_ui.controls.append(ft.Text("📋 Extrayendo título final...", color=ft.Colors.AMBER_800))
                             page.update()
-                            time.sleep(3)
-                            
-                            prompt_invest = field_prompt_investigacion.value.replace("[TITULO]", titulo_final)
-                            with open(os.path.join(path, "PROMPT_INVESTIGACION.txt"), "w", encoding="utf-8") as f:
-                                f.write(prompt_invest)
-                            
-                            log_ui.controls.append(ft.Text(f"🌐 Enviando prompt de investigación a ChatGPT...", color=ft.Colors.BLUE))
-                            page.update()
-                            
-                            if abrir_y_pegar_chatgpt(prompt_invest):
-                                espera_invest = 60
-                                log_ui.controls.append(ft.Text(f"⏳ Esperando {espera_invest}s generación de investigación...", italic=True))
-                                page.update()
-                                time.sleep(espera_invest)
-                                
-                                log_ui.controls.append(ft.Text("📋 Extrayendo respuesta de investigación...", color=ft.Colors.AMBER_800))
-                                page.update()
-                                
-                                texto_investigacion = extraer_respuesta_automatica()
-                                
-                                if texto_investigacion:
-                                    with open(os.path.join(path, "RESPUESTA_INVESTIGACION.txt"), "w", encoding="utf-8") as f:
-                                        f.write(texto_investigacion)
-                                    log_ui.controls.append(ft.Text("✅ Investigación guardada en RESPUESTA_INVESTIGACION.txt", color=ft.Colors.GREEN_700, weight="bold"))
+                            texto_copiado = extraer_respuesta_automatica()
+                            if texto_copiado:
+                                titulo_final = extraer_solo_el_titulo(texto_copiado)
+                                if titulo_final:
+                                    titulo_extraido = titulo_final
+                                    if archivo_salida:
+                                        with open(os.path.join(path, archivo_salida), "w", encoding="utf-8") as f:
+                                            f.write(titulo_final)
+                                    log_ui.controls.append(ft.Text(f"🎯 Título detectado: {titulo_final}", color=ft.Colors.GREEN_700, weight="bold"))
                                 else:
-                                    log_ui.controls.append(ft.Text("❌ Error: No se pudo extraer la investigación.", color=ft.Colors.RED))
+                                    with open(os.path.join(path, "RESPUESTA_RAW.txt"), "w", encoding="utf-8") as f:
+                                        f.write(texto_copiado)
+                                    log_ui.controls.append(ft.Text("⚠ No se encontró el título real. Se guardó Raw.", color=ft.Colors.ORANGE))
                             else:
-                                log_ui.controls.append(ft.Text("❌ Error: No se pudo enviar el prompt de investigación.", color=ft.Colors.RED))
+                                log_ui.controls.append(ft.Text("❌ Error: Portapapeles vacío.", color=ft.Colors.RED))
+                                
+                        elif post_accion == "guardar_respuesta":
+                            log_ui.controls.append(ft.Text(f"📋 Extrayendo respuesta para '{nombre_prompt}'...", color=ft.Colors.AMBER_800))
                             page.update()
-                            
+                            texto_resp = extraer_respuesta_automatica()
+                            if texto_resp:
+                                if archivo_salida:
+                                    with open(os.path.join(path, archivo_salida), "w", encoding="utf-8") as f:
+                                        f.write(texto_resp)
+                                log_ui.controls.append(ft.Text(f"✅ Respuesta guardada: {archivo_salida}", color=ft.Colors.GREEN_700, weight="bold"))
+                            else:
+                                log_ui.controls.append(ft.Text(f"❌ Error al extraer respuesta de '{nombre_prompt}'.", color=ft.Colors.RED))
                         else:
-                            with open(os.path.join(path, "RESPUESTA_RAW.txt"), "w", encoding="utf-8") as f:
-                                f.write(texto_copiado)
-                            log_ui.controls.append(ft.Text("⚠ No se encontró el título real. Se guardó Raw.", color=ft.Colors.ORANGE))
+                            # solo_enviar
+                            log_ui.controls.append(ft.Text(f"✅ Prompt '{nombre_prompt}' enviado.", color=ft.Colors.GREEN_700))
                     else:
-                        log_ui.controls.append(ft.Text("❌ Error: Portapapeles vacío.", color=ft.Colors.RED))
+                        log_ui.controls.append(ft.Text(f"❌ Error: No se pudo enviar '{nombre_prompt}'.", color=ft.Colors.RED))
+                    
+                    page.update()
+                    
+                    # Pausa entre prompts
+                    if idx < len(habilitados) - 1:
+                        time.sleep(3)
 
                 log_ui.controls.append(ft.Divider())
                 log_ui.controls.append(ft.Text(f"✅ FINALIZADO: video {num}", weight="bold", color=ft.Colors.GREEN_800))
@@ -468,12 +699,22 @@ def main(page: ft.Page):
         ft.Row([ft.Icon(ft.Icons.SETTINGS), ft.Text("CONFIGURACIÓN", weight="bold")]),
         txt_proximo,
         ft.ElevatedButton("Ruta de Proyectos", icon=ft.Icons.FOLDER_OPEN, on_click=lambda _: picker.get_directory_path()),
+    ])))
+
+    tile_prompts = ft.Card(col={"md": 12}, content=ft.Container(padding=20, content=ft.Column([
+        ft.Row([
+            ft.Icon(ft.Icons.AUTO_FIX_HIGH, color=ft.Colors.PURPLE_600),
+            ft.Text("PROMPT MANAGER", weight="bold", size=16, expand=True),
+            ft.ElevatedButton(
+                "Agregar Prompt",
+                icon=ft.Icons.ADD_CIRCLE_OUTLINE,
+                on_click=agregar_prompt_nuevo,
+                bgcolor=ft.Colors.PURPLE_600,
+                color="white",
+            ),
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
         ft.Divider(),
-        field_prompt,
-        ft.ElevatedButton("Guardar Prompt Título", on_click=lambda _: guardar_config(prompt=field_prompt.value), width=1000),
-        ft.Divider(),
-        field_prompt_investigacion,
-        ft.ElevatedButton("Guardar Prompt Investigación", on_click=lambda _: guardar_config(prompt_investigacion=field_prompt_investigacion.value), width=1000)
+        prompts_ui
     ])))
 
     picker = ft.FilePicker(on_result=lambda e: (guardar_config(ruta=e.path), page.update()) if e.path else None)
@@ -481,9 +722,11 @@ def main(page: ft.Page):
 
     page.add(
         ft.Row([ft.Text("Clusiv", size=32, weight="bold", color=ft.Colors.BLUE_800), ft.Text("Automation", size=32)], alignment=ft.MainAxisAlignment.CENTER),
-        ft.ResponsiveRow([tile_gestion, tile_flujo, tile_config])
+        ft.ResponsiveRow([tile_gestion, tile_flujo, tile_config]),
+        ft.ResponsiveRow([tile_prompts]),
     )
     refrescar_canales()
+    refrescar_prompts()
 
 if __name__ == "__main__":
     ft.app(target=main)

@@ -1,4 +1,23 @@
 {
-    "ruta_proyectos": "C:\\Users\\carlo\\Downloads\\yt\\remotion\\mi-video\\public\\projects\\video 2",
-    "prompt_template": "**Act as a senior YouTube Growth Strategist and expert Copywriter.**\r\n\r\nI have a specific video title that performed exceptionally well on my channel. I need you to reverse-engineer its success and use those insights to create better, high-CTR variations in English.\r\n\r\n**The successful title (in Spanish) was:**\r\n[REF_TITLE]\r\n\r\n**Please complete the following two steps:**\r\n\r\n**STEP 1: The Analysis**\r\nBriefly analyze **why** this title worked effectively. Identify the psychological triggers (e.g., fear, urgency, curiosity, high stakes) and the power keywords used. Explain the \"hook\" mechanism behind it.\r\n\r\n**STEP 2: The Proposal**\r\nBased on your analysis, generate **1 new high-performing title variation in ENGLISH**.\r\n\r\n**CRITICAL INSTRUCTION FOR STEP 2:**\r\nYou must provide the title strictly inside this structure so I can parse it:\r\n[FINAL_TITLE: Put the generated title here]\r\n\r\n**Guidelines for the new title:**\r\n1.  **Language:** All titles must be in **English**.\r\n2.  **Psychology:** Leverage the \"Curiosity Gap\" or \"Urgency\" triggers.\r\n3.  **Structure:** Use \"Front-loading\" (put the most impactful words at the beginning).\r\n4.  **Length:** Keep them concise (optimized for mobile)."
+    "ruta_proyectos": "C:\\Users\\carlo\\Downloads\\yt\\remotion\\mi-video\\public\\projects",
+    "prompts": [
+        {
+            "nombre": "Generar Título",
+            "texto": "**Act as a senior YouTube Growth Strategist and expert Copywriter.**\r\n\r\nI have a specific video title that performed exceptionally well on my channel. I need you to reverse-engineer its success and use those insights to create better, high-CTR variations in English.\r\n\r\n**The successful title (in Spanish) was:**\r\n[REF_TITLE]\r\n\r\n**Please complete the following two steps:**\r\n\r\n**STEP 1: The Analysis**\r\nBriefly analyze **why** this title worked effectively. Identify the psychological triggers (e.g., fear, urgency, curiosity, high stakes) and the power keywords used. Explain the \"hook\" mechanism behind it.\r\n\r\n**STEP 2: The Proposal**\r\nBased on your analysis, generate **1 new high-performing title variation in ENGLISH**.\r\n\r\n**CRITICAL INSTRUCTION FOR STEP 2:**\r\nYou must provide the title strictly inside this structure so I can parse it:\r\n[FINAL_TITLE: Put the generated title here]\r\n\r\n**Guidelines for the new title:**\r\n1.  **Language:** All titles must be in **English**.\r\n2.  **Psychology:** Leverage the \"Curiosity Gap\" or \"Urgency\" triggers.\r\n3.  **Structure:** Use \"Front-loading\" (put the most impactful words at the beginning).\r\n4.  **Length:** Keep them concise (optimized for mobile).",
+            "modo": "nueva",
+            "espera_segundos": 30,
+            "habilitado": true,
+            "post_accion": "extraer_titulo",
+            "archivo_salida": "TITULO_FINAL.txt"
+        },
+        {
+            "nombre": "Investigación (5 Key Questions)",
+            "texto": "I want you to follow these steps.\nStep 1:\nBased on the following title for a youtube video, generate an outline with 5 key questions that explore its central theme. The outline and questions should be structured in a way that keeps people's attention, as it will be used to create a video script. For this reason, it is necessary to begin with the most important and pressing question for the audience, followed by questions that help dive deeper into the content.\nFor each of these questions, conduct research using reputable web sources that provide verified information, such as:\n\nnytimes.com\n\nwashingtonpost.com\n\nnpr.org\n\nbbc.com\n\naxios.com\n\napnews.com\n\nbloomberg.com\n\nfoxnews.com\n\nnews.yahoo.com\n\nnbc.com\n\nreuters.com\n\ncnbc.com\n\nwsj.com\n\nfoxbusiness.com\n\nft.com\n\neconomist.com\n\nmarketwatch.com\n\ninvesting.com\n\nedition.cnn.com\n\npolitico.com\n\nusnews.com\n\npropublica.org\nYou can also include scientific papers, indexed journals, or official U.S. government websites. Avoid social media, youtube, unverified blogs, and low-credibility content. Cross-check at least three reliable sources to confirm each relevant fact.\n\nTitle for a YouTube video:\n[TITULO]",
+            "modo": "nueva",
+            "espera_segundos": 60,
+            "habilitado": true,
+            "post_accion": "guardar_respuesta",
+            "archivo_salida": "RESPUESTA_INVESTIGACION.txt"
+        }
+    ]
 }
