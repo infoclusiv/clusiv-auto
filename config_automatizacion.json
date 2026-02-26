@@ -9,7 +9,7 @@
             "habilitado": true,
             "post_accion": "extraer_titulo",
             "archivo_salida": "TITULO_FINAL.txt",
-            "antibot": true,
+            "antibot": false,
             "wpm_escritura": 80
         },
         {
@@ -20,7 +20,7 @@
             "habilitado": true,
             "post_accion": "solo_enviar",
             "archivo_salida": "",
-            "antibot": true,
+            "antibot": false,
             "wpm_escritura": 80
         },
         {
@@ -32,7 +32,7 @@
             "post_accion": "solo_enviar",
             "archivo_salida": "",
             "antibot": true,
-            "wpm_escritura": 80
+            "wpm_escritura": 120
         },
         {
             "nombre": "Teleprompter Script Article 1",
@@ -42,7 +42,7 @@
             "habilitado": true,
             "post_accion": "solo_enviar",
             "archivo_salida": "",
-            "antibot": true,
+            "antibot": false,
             "wpm_escritura": 80
         }
     ]

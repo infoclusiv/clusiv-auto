@@ -228,38 +228,63 @@ def eliminar_canal_db(ch_id):
     conn.close()
 
 # --- 2.5 FUNCIONES ANTI-BOT ---
-def escribir_humanizado(texto, wpm=45):
+def escribir_humanizado(texto, wpm=45, stop_event=None):
     """Escribe texto carácter por carácter simulando velocidad humana.
-    Pausas asimétricas: espacio y Enter tardan más que letras normales."""
+    Pausas asimétricas: espacio y Enter tardan más que letras normales.
+    Se detiene si stop_event está activado."""
     wpm_real = wpm * random.uniform(0.8, 1.2)
-    base_delay = 60.0 / (wpm_real * 5)  # ~5 chars por palabra promedio
+    base_delay = 60.0 / (wpm_real * 5)
     for char in texto:
+        if stop_event and stop_event.is_set():
+            return False
         if char == ' ':
-            # Pausa asimétrica: espacio tarda más
             time.sleep(random.uniform(base_delay * 1.8, base_delay * 3.5))
             pyautogui.press('space')
         elif char == '\n':
-            # Pausa asimétrica: Enter tarda aún más
             time.sleep(random.uniform(base_delay * 3.0, base_delay * 5.0))
             pyautogui.press('enter')
         elif char == '\t':
             time.sleep(random.uniform(base_delay * 0.5, base_delay * 1.0))
             pyautogui.press('tab')
         else:
-            # Letras normales con variación
             time.sleep(random.uniform(base_delay * 0.5, base_delay * 1.5))
             pyautogui.typewrite(char, interval=0) if char.isascii() and char.isprintable() else pyautogui.hotkey(char)
+    return True
 
-def espera_humanizada(segundos):
-    """Espera con variación aleatoria ±20% y decimales."""
-    time.sleep(random.uniform(segundos * 0.8, segundos * 1.2))
+def espera_humanizada(segundos, stop_event=None):
+    """Espera con variación aleatoria ±20% y decimales.
+    Fragmenta la espera en intervalos de 0.5s para permitir cancelación."""
+    total = random.uniform(segundos * 0.8, segundos * 1.2)
+    elapsed = 0.0
+    while elapsed < total:
+        if stop_event and stop_event.is_set():
+            return False
+        chunk = min(0.5, total - elapsed)
+        time.sleep(chunk)
+        elapsed += chunk
+    return True
 
-def scroll_simulado():
-    """Simula scroll aleatorio de lectura/atención."""
+def scroll_simulado(stop_event=None):
+    """Simula scroll aleatorio de lectura/atención.
+    Se detiene si stop_event está activado."""
     veces = random.randint(1, 3)
     for _ in range(veces):
+        if stop_event and stop_event.is_set():
+            return False
         pyautogui.scroll(random.choice([-3, -2, -1, 1, 2, 3]))
         time.sleep(random.uniform(0.3, 0.8))
+    return True
+
+def sleep_cancelable(segundos, stop_event=None):
+    """time.sleep fragmentado que permite cancelación."""
+    elapsed = 0.0
+    while elapsed < segundos:
+        if stop_event and stop_event.is_set():
+            return False
+        chunk = min(0.5, segundos - elapsed)
+        time.sleep(chunk)
+        elapsed += chunk
+    return True
 
 # --- 3. LÓGICA DE YOUTUBE Y CARPETAS ---
 def analizar_rendimiento_canal(channel_id):
@@ -299,6 +324,9 @@ def main(page: ft.Page):
     config_actual = cargar_toda_config()
     ruta_base = [config_actual["ruta_proyectos"]]
     prompts_lista = config_actual["prompts"]
+    
+    # Señal de cancelación para detener el flujo
+    stop_event = threading.Event()
 
     # UI Elements
     input_id = ft.TextField(label="ID del Canal", expand=True)
@@ -307,6 +335,41 @@ def main(page: ft.Page):
     log_ui = ft.Column(spacing=5)
     prg = ft.ProgressBar(width=400, visible=False, color=ft.Colors.GREEN_700)
     txt_proximo = ft.Text(size=14, weight="bold", color=ft.Colors.BLUE_GREY_700)
+
+    # Botón de detener flujo y referencia mutable del botón ejecutar
+    btn_ejecutar_ref = [None]  # Se asignará más adelante (lista mutable para referencia)
+    btn_detener = ft.ElevatedButton(
+        "DETENER FLUJO",
+        icon=ft.Icons.STOP_CIRCLE,
+        bgcolor=ft.Colors.RED_700,
+        color="white",
+        height=50,
+        width=1000,
+        visible=False,
+        on_click=lambda _: detener_flujo(),
+    )
+
+    def detener_flujo():
+        stop_event.set()
+        btn_detener.disabled = True
+        btn_detener.text = "DETENIENDO..."
+        btn_detener.bgcolor = ft.Colors.GREY_500
+        log_ui.controls.append(
+            ft.Text("⛔ Solicitud de detención enviada. Esperando que el paso actual finalice...",
+                    color=ft.Colors.ORANGE_800, weight="bold", italic=True)
+        )
+        page.update()
+
+    def set_estado_ejecutando(ejecutando):
+        """Alterna visibilidad/estado de los botones ejecutar/detener."""
+        if btn_ejecutar_ref[0]:
+            btn_ejecutar_ref[0].disabled = ejecutando
+            btn_ejecutar_ref[0].bgcolor = ft.Colors.GREY_500 if ejecutando else ft.Colors.GREEN_700
+        btn_detener.visible = ejecutando
+        btn_detener.disabled = False
+        btn_detener.text = "DETENER FLUJO"
+        btn_detener.bgcolor = ft.Colors.RED_700
+        page.update()
 
     # Prompt Manager UI container
     prompts_ui = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO)
@@ -597,6 +660,9 @@ def main(page: ft.Page):
 
     # --- AUTOMATIZACIÓN DE CHATGPT ---
     def abrir_y_pegar_chatgpt(prompt_final, modo="nueva", antibot=False, wpm=45):
+        if stop_event.is_set():
+            return False
+        
         if modo == "nueva":
             if os.path.exists(PATH_CHATGPT):
                 os.startfile(PATH_CHATGPT)
@@ -605,7 +671,14 @@ def main(page: ft.Page):
         
         ventana_encontrada = None
         for _ in range(15):
-            espera_humanizada(1) if antibot else time.sleep(1)
+            if stop_event.is_set():
+                return False
+            if antibot:
+                if not espera_humanizada(1, stop_event):
+                    return False
+            else:
+                if not sleep_cancelable(1, stop_event):
+                    return False
             windows = [w for w in gw.getAllWindows() if "ChatGPT" in w.title]
             if windows:
                 ventana_encontrada = windows[0]
@@ -613,22 +686,35 @@ def main(page: ft.Page):
         
         if ventana_encontrada:
             try:
+                if stop_event.is_set():
+                    return False
                 ventana_encontrada.activate()
-                espera_humanizada(2) if antibot else time.sleep(2)
+                if antibot:
+                    if not espera_humanizada(2, stop_event):
+                        return False
+                else:
+                    if not sleep_cancelable(2, stop_event):
+                        return False
+                
+                if stop_event.is_set():
+                    return False
                 
                 if antibot:
-                    # Escritura humanizada: carácter por carácter
-                    escribir_humanizado(prompt_final, wpm=wpm)
-                    espera_humanizada(0.5)
+                    resultado = escribir_humanizado(prompt_final, wpm=wpm, stop_event=stop_event)
+                    if not resultado:
+                        return False
+                    if not espera_humanizada(0.5, stop_event):
+                        return False
                     pyautogui.press('enter')
                 else:
-                    # Modo clásico: pegar de golpe
                     pyperclip.copy(prompt_final)
                     pyautogui.hotkey('ctrl', 'v')
-                    time.sleep(0.5)
+                    if not sleep_cancelable(0.5, stop_event):
+                        return False
                     pyautogui.press('enter')
                 return True
-            except: pass
+            except:
+                pass
         return False
 
     def extraer_solo_el_titulo(texto_completo):
@@ -645,26 +731,55 @@ def main(page: ft.Page):
 
     def extraer_respuesta_automatica(antibot=False):
         try:
+            if stop_event.is_set():
+                return None
+            
             windows = [w for w in gw.getAllWindows() if "ChatGPT" in w.title]
             if not windows: return None
             
             ventana = windows[0]
             ventana.activate()
-            espera_humanizada(1.5) if antibot else time.sleep(1.5)
+            if antibot:
+                if not espera_humanizada(1.5, stop_event):
+                    return None
+            else:
+                if not sleep_cancelable(1.5, stop_event):
+                    return None
+
+            if stop_event.is_set():
+                return None
 
             if antibot:
-                scroll_simulado()  # Simular lectura antes de copiar
+                scroll_simulado(stop_event)
+
+            if stop_event.is_set():
+                return None
 
             ancho, alto = ventana.size
             centro_x = ventana.left + (ancho // 2)
             centro_y = ventana.top + (alto // 2)
             pyautogui.click(centro_x, centro_y)
-            espera_humanizada(0.5) if antibot else time.sleep(0.5)
+            if antibot:
+                if not espera_humanizada(0.5, stop_event):
+                    return None
+            else:
+                if not sleep_cancelable(0.5, stop_event):
+                    return None
 
             pyautogui.hotkey('ctrl', 'a')
-            espera_humanizada(0.5) if antibot else time.sleep(0.5)
+            if antibot:
+                if not espera_humanizada(0.5, stop_event):
+                    return None
+            else:
+                if not sleep_cancelable(0.5, stop_event):
+                    return None
             pyautogui.hotkey('ctrl', 'c')
-            espera_humanizada(1.5) if antibot else time.sleep(1.5)
+            if antibot:
+                if not espera_humanizada(1.5, stop_event):
+                    return None
+            else:
+                if not sleep_cancelable(1.5, stop_event):
+                    return None
 
             return pyperclip.paste()
         except:
@@ -680,46 +795,65 @@ def main(page: ft.Page):
         habilitados = [p for p in prompts_lista if p.get("habilitado", True)]
         if not habilitados:
             show_snack("No hay prompts habilitados", ft.Colors.RED); return
-            
+        
+        # Limpiar señal de cancelación y preparar UI
+        stop_event.clear()
         log_ui.controls.clear()
         log_ui.controls.append(ft.Text("🚀 Iniciando flujo completo...", italic=True))
         prg.visible = True
+        set_estado_ejecutando(True)
         page.update()
 
         def proceso_hilo():
-            canales = obtener_canales_db()
-            ganadores_totales = []
-
-            for ch_id, ch_name, _ in canales:
-                log_ui.controls.append(ft.Text(f"Analizando: {ch_name}...", size=12))
-                page.update()
-                data = analizar_rendimiento_canal(ch_id)
-                if data and data['ganadores']:
-                    v = data['ganadores'][0]
-                    v['ch_name'] = ch_name
-                    ganadores_totales.append(v)
-
-            if not ganadores_totales:
-                log_ui.controls.append(ft.Text("❌ No se encontraron videos ganadores.", color=ft.Colors.RED))
-                prg.visible = False
-                page.update()
-                return
-
-            mejor = max(ganadores_totales, key=lambda x: x['views'])
-            titulo_ref = mejor['title']
-            
-            num = obtener_siguiente_num(ruta_base[0])
-            path = os.path.join(ruta_base[0], f"video {num}")
-            
+            detenido = False
             try:
+                canales = obtener_canales_db()
+                ganadores_totales = []
+
+                for ch_id, ch_name, _ in canales:
+                    if stop_event.is_set():
+                        detenido = True
+                        break
+                    log_ui.controls.append(ft.Text(f"Analizando: {ch_name}...", size=12))
+                    page.update()
+                    data = analizar_rendimiento_canal(ch_id)
+                    if data and data['ganadores']:
+                        v = data['ganadores'][0]
+                        v['ch_name'] = ch_name
+                        ganadores_totales.append(v)
+
+                if detenido or stop_event.is_set():
+                    log_ui.controls.append(ft.Text("⛔ Flujo detenido por el usuario durante el análisis de canales.", color=ft.Colors.RED_700, weight="bold"))
+                    prg.visible = False
+                    set_estado_ejecutando(False)
+                    page.update()
+                    return
+
+                if not ganadores_totales:
+                    log_ui.controls.append(ft.Text("❌ No se encontraron videos ganadores.", color=ft.Colors.RED))
+                    prg.visible = False
+                    set_estado_ejecutando(False)
+                    page.update()
+                    return
+
+                mejor = max(ganadores_totales, key=lambda x: x['views'])
+                titulo_ref = mejor['title']
+                
+                num = obtener_siguiente_num(ruta_base[0])
+                path = os.path.join(ruta_base[0], f"video {num}")
+                
                 os.makedirs(os.path.join(path, "assets"), exist_ok=True)
                 os.makedirs(os.path.join(path, "images"), exist_ok=True)
                 open(os.path.join(path, "scenes.txt"), "w", encoding="utf-8").close()
                 open(os.path.join(path, "scenes with duration.txt"), "w", encoding="utf-8").close()
                 
-                titulo_extraido = None  # Se llenará con el título del primer prompt que lo extraiga
-                
+                titulo_extraido = None
+
                 for idx, p in enumerate(habilitados):
+                    if stop_event.is_set():
+                        detenido = True
+                        break
+
                     nombre_prompt = p.get("nombre", f"Prompt {idx+1}")
                     post_accion = p.get("post_accion", "solo_enviar")
                     modo = p.get("modo", "nueva")
@@ -728,13 +862,11 @@ def main(page: ft.Page):
                     ab = p.get("antibot", False)
                     wpm = p.get("wpm_escritura", 45)
                     
-                    # Preparar texto del prompt (reemplazar placeholders)
                     texto_prompt = p.get("texto", "")
                     texto_prompt = texto_prompt.replace("[REF_TITLE]", titulo_ref)
                     if titulo_extraido:
                         texto_prompt = texto_prompt.replace("[TITULO]", titulo_extraido)
                     
-                    # Guardar prompt en archivo
                     nombre_archivo_prompt = f"PROMPT_{idx+1}_{nombre_prompt.replace(' ', '_')}.txt"
                     with open(os.path.join(path, nombre_archivo_prompt), "w", encoding="utf-8") as f:
                         f.write(texto_prompt)
@@ -743,23 +875,50 @@ def main(page: ft.Page):
                     log_ui.controls.append(ft.Text(f"🌐 [{idx+1}/{len(habilitados)}] Enviando: {nombre_prompt}{ab_tag}...", color=ft.Colors.BLUE))
                     page.update()
                     
-                    if abrir_y_pegar_chatgpt(texto_prompt, modo=modo, antibot=ab, wpm=wpm):
+                    if stop_event.is_set():
+                        detenido = True
+                        break
+
+                    envio_ok = abrir_y_pegar_chatgpt(texto_prompt, modo=modo, antibot=ab, wpm=wpm)
+                    
+                    if stop_event.is_set():
+                        detenido = True
+                        break
+
+                    if envio_ok:
                         log_ui.controls.append(ft.Text(f"⏳ Esperando ~{espera}s generación...", italic=True))
                         page.update()
                         
                         if ab:
-                            # Espera humanizada + scroll de lectura durante la espera
-                            espera_humanizada(espera * 0.5)
-                            scroll_simulado()
-                            espera_humanizada(espera * 0.5)
+                            if not espera_humanizada(espera * 0.5, stop_event):
+                                detenido = True
+                                break
+                            scroll_simulado(stop_event)
+                            if stop_event.is_set():
+                                detenido = True
+                                break
+                            if not espera_humanizada(espera * 0.5, stop_event):
+                                detenido = True
+                                break
                         else:
-                            time.sleep(espera)
+                            if not sleep_cancelable(espera, stop_event):
+                                detenido = True
+                                break
                         
+                        if stop_event.is_set():
+                            detenido = True
+                            break
+
                         # Post-acción
                         if post_accion == "extraer_titulo":
                             log_ui.controls.append(ft.Text("📋 Extrayendo título final...", color=ft.Colors.AMBER_800))
                             page.update()
                             texto_copiado = extraer_respuesta_automatica(antibot=ab)
+                            
+                            if stop_event.is_set():
+                                detenido = True
+                                break
+                            
                             if texto_copiado:
                                 titulo_final = extraer_solo_el_titulo(texto_copiado)
                                 if titulo_final:
@@ -779,6 +938,11 @@ def main(page: ft.Page):
                             log_ui.controls.append(ft.Text(f"📋 Extrayendo respuesta para '{nombre_prompt}'...", color=ft.Colors.AMBER_800))
                             page.update()
                             texto_resp = extraer_respuesta_automatica(antibot=ab)
+                            
+                            if stop_event.is_set():
+                                detenido = True
+                                break
+                            
                             if texto_resp:
                                 if archivo_salida:
                                     with open(os.path.join(path, archivo_salida), "w", encoding="utf-8") as f:
@@ -787,28 +951,42 @@ def main(page: ft.Page):
                             else:
                                 log_ui.controls.append(ft.Text(f"❌ Error al extraer respuesta de '{nombre_prompt}'.", color=ft.Colors.RED))
                         else:
-                            # solo_enviar
                             log_ui.controls.append(ft.Text(f"✅ Prompt '{nombre_prompt}' enviado.", color=ft.Colors.GREEN_700))
                     else:
+                        if stop_event.is_set():
+                            detenido = True
+                            break
                         log_ui.controls.append(ft.Text(f"❌ Error: No se pudo enviar '{nombre_prompt}'.", color=ft.Colors.RED))
                     
                     page.update()
                     
                     # Pausa entre prompts
                     if idx < len(habilitados) - 1:
-                        espera_humanizada(3) if ab else time.sleep(3)
+                        if ab:
+                            if not espera_humanizada(3, stop_event):
+                                detenido = True
+                                break
+                        else:
+                            if not sleep_cancelable(3, stop_event):
+                                detenido = True
+                                break
 
+                # Mensaje final
                 log_ui.controls.append(ft.Divider())
-                log_ui.controls.append(ft.Text(f"✅ FINALIZADO: video {num}", weight="bold", color=ft.Colors.GREEN_800))
+                if detenido or stop_event.is_set():
+                    log_ui.controls.append(ft.Text(f"⛔ FLUJO DETENIDO por el usuario en video {num}", weight="bold", color=ft.Colors.RED_700))
+                else:
+                    log_ui.controls.append(ft.Text(f"✅ FINALIZADO: video {num}", weight="bold", color=ft.Colors.GREEN_800))
 
             except Exception as ex:
                 log_ui.controls.append(ft.Text(f"Error: {str(ex)}", color=ft.Colors.RED))
             
             prg.visible = False
             txt_proximo.value = f"Próximo Proyecto: video {obtener_siguiente_num(ruta_base[0])}"
+            set_estado_ejecutando(False)
             page.update()
 
-        threading.Thread(target=proceso_hilo).start()
+        threading.Thread(target=proceso_hilo, daemon=True).start()
 
     # --- UI LAYOUT ---
     tile_gestion = ft.Card(col={"md": 4}, content=ft.Container(padding=20, content=ft.Column([
@@ -819,9 +997,21 @@ def main(page: ft.Page):
         lista_canales_ui
     ])))
 
+    btn_ejecutar_widget = ft.ElevatedButton(
+        "EJECUTAR FLUJO COMPLETO",
+        icon=ft.Icons.AUTO_AWESOME,
+        on_click=ejecutar_flujo_completo,
+        bgcolor=ft.Colors.GREEN_700,
+        color="white",
+        height=50,
+        width=1000,
+    )
+    btn_ejecutar_ref[0] = btn_ejecutar_widget
+
     tile_flujo = ft.Card(col={"md": 4}, content=ft.Container(padding=20, content=ft.Column([
         ft.Row([ft.Icon(ft.Icons.BOLT, color=ft.Colors.AMBER_700), ft.Text("AUTOMATIZACIÓN", weight="bold")]),
-        ft.ElevatedButton("EJECUTAR FLUJO COMPLETO", icon=ft.Icons.AUTO_AWESOME, on_click=ejecutar_flujo_completo, bgcolor=ft.Colors.GREEN_700, color="white", height=50, width=1000),
+        btn_ejecutar_widget,
+        btn_detener,
         prg,
         ft.Divider(),
         log_ui
