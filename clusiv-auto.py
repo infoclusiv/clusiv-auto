@@ -4,6 +4,7 @@ import re
 import json
 import sqlite3
 import time
+import random
 import threading
 import pyautogui
 import pygetwindow as gw
@@ -109,6 +110,8 @@ PROMPTS_DEFAULT = [
         "modo": "nueva",
         "espera_segundos": 30,
         "habilitado": True,
+        "antibot": True,
+        "wpm_escritura": 45,
         "post_accion": "extraer_titulo",
         "archivo_salida": "TITULO_FINAL.txt"
     },
@@ -118,6 +121,8 @@ PROMPTS_DEFAULT = [
         "modo": "nueva",
         "espera_segundos": 60,
         "habilitado": True,
+        "antibot": True,
+        "wpm_escritura": 45,
         "post_accion": "guardar_respuesta",
         "archivo_salida": "RESPUESTA_INVESTIGACION.txt"
     }
@@ -150,6 +155,8 @@ def cargar_toda_config():
                     "modo": "nueva",
                     "espera_segundos": 30,
                     "habilitado": True,
+                    "antibot": True,
+                    "wpm_escritura": 45,
                     "post_accion": "extraer_titulo",
                     "archivo_salida": "TITULO_FINAL.txt"
                 })
@@ -159,6 +166,8 @@ def cargar_toda_config():
                     "modo": "nueva",
                     "espera_segundos": 60,
                     "habilitado": True,
+                    "antibot": True,
+                    "wpm_escritura": 45,
                     "post_accion": "guardar_respuesta",
                     "archivo_salida": "RESPUESTA_INVESTIGACION.txt"
                 })
@@ -166,6 +175,19 @@ def cargar_toda_config():
                 # Guardar migración
                 with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
                     json.dump(conf, fw, indent=4, ensure_ascii=False)
+            else:
+                # Migración de campos antibot para prompts existentes
+                migrado = False
+                for p in conf["prompts"]:
+                    if "antibot" not in p:
+                        p["antibot"] = True
+                        migrado = True
+                    if "wpm_escritura" not in p:
+                        p["wpm_escritura"] = 45
+                        migrado = True
+                if migrado:
+                    with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
+                        json.dump(conf, fw, indent=4, ensure_ascii=False)
             return conf
     return {"ruta_proyectos": "", "prompts": list(PROMPTS_DEFAULT)}
 
@@ -204,6 +226,40 @@ def eliminar_canal_db(ch_id):
     conn.execute("DELETE FROM channels WHERE channel_id = ?", (ch_id,))
     conn.commit()
     conn.close()
+
+# --- 2.5 FUNCIONES ANTI-BOT ---
+def escribir_humanizado(texto, wpm=45):
+    """Escribe texto carácter por carácter simulando velocidad humana.
+    Pausas asimétricas: espacio y Enter tardan más que letras normales."""
+    wpm_real = wpm * random.uniform(0.8, 1.2)
+    base_delay = 60.0 / (wpm_real * 5)  # ~5 chars por palabra promedio
+    for char in texto:
+        if char == ' ':
+            # Pausa asimétrica: espacio tarda más
+            time.sleep(random.uniform(base_delay * 1.8, base_delay * 3.5))
+            pyautogui.press('space')
+        elif char == '\n':
+            # Pausa asimétrica: Enter tarda aún más
+            time.sleep(random.uniform(base_delay * 3.0, base_delay * 5.0))
+            pyautogui.press('enter')
+        elif char == '\t':
+            time.sleep(random.uniform(base_delay * 0.5, base_delay * 1.0))
+            pyautogui.press('tab')
+        else:
+            # Letras normales con variación
+            time.sleep(random.uniform(base_delay * 0.5, base_delay * 1.5))
+            pyautogui.typewrite(char, interval=0) if char.isascii() and char.isprintable() else pyautogui.hotkey(char)
+
+def espera_humanizada(segundos):
+    """Espera con variación aleatoria ±20% y decimales."""
+    time.sleep(random.uniform(segundos * 0.8, segundos * 1.2))
+
+def scroll_simulado():
+    """Simula scroll aleatorio de lectura/atención."""
+    veces = random.randint(1, 3)
+    for _ in range(veces):
+        pyautogui.scroll(random.choice([-3, -2, -1, 1, 2, 3]))
+        time.sleep(random.uniform(0.3, 0.8))
 
 # --- 3. LÓGICA DE YOUTUBE Y CARPETAS ---
 def analizar_rendimiento_canal(channel_id):
@@ -267,8 +323,13 @@ def main(page: ft.Page):
         espera = p.get("espera_segundos", 30)
         accion = p.get("post_accion", "solo_enviar")
         archivo = p.get("archivo_salida", "")
+        antibot = p.get("antibot", False)
+        wpm = p.get("wpm_escritura", 45)
         
-        partes = [f"📤 Enviar ({icono_modo})", f"⏳ {espera}s"]
+        partes = []
+        if antibot:
+            partes.append(f"🛡️ Anti-Bot ({wpm} WPM)")
+        partes.extend([f"📤 Enviar ({icono_modo})", f"⏳ {espera}s"])
         
         if accion == "extraer_titulo":
             partes.append("📥 Extraer [FINAL_TITLE]")
@@ -364,6 +425,8 @@ def main(page: ft.Page):
             "modo": "nueva",
             "espera_segundos": 30,
             "habilitado": True,
+            "antibot": True,
+            "wpm_escritura": 45,
             "post_accion": "solo_enviar",
             "archivo_salida": ""
         }
@@ -414,6 +477,50 @@ def main(page: ft.Page):
             dense=True, width=300
         )
 
+        # --- Anti-Bot Controls ---
+        f_antibot = ft.Switch(
+            label="🛡️ Anti-Bot (Escritura humanizada, pausas aleatorias, scroll)",
+            value=p.get("antibot", True),
+            active_color=ft.Colors.TEAL_600,
+        )
+        
+        wpm_value = p.get("wpm_escritura", 45)
+        f_wpm_label = ft.Text(f"{wpm_value} WPM", size=13, weight="bold", color=ft.Colors.TEAL_700)
+        
+        def on_wpm_change(e):
+            val = int(e.control.value)
+            f_wpm_label.value = f"{val} WPM"
+            page.update()
+        
+        f_wpm_slider = ft.Slider(
+            min=20, max=120, divisions=20,
+            value=wpm_value,
+            label="{value} WPM",
+            active_color=ft.Colors.TEAL_600,
+            on_change=on_wpm_change,
+            expand=True,
+        )
+
+        antibot_section = ft.Container(
+            content=ft.Column([
+                f_antibot,
+                ft.Row([
+                    ft.Text("Velocidad de escritura:", size=12, color=ft.Colors.GREY_700),
+                    f_wpm_slider,
+                    f_wpm_label,
+                ], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Text(
+                    "Lento ← 20 WPM ··· 120 WPM → Rápido",
+                    size=10, color=ft.Colors.GREY_500, italic=True,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            ], spacing=4),
+            padding=ft.padding.all(10),
+            border=ft.border.all(1, ft.Colors.TEAL_200),
+            border_radius=8,
+            bgcolor=ft.Colors.TEAL_50,
+        )
+
         def cerrar_editor(e):
             dlg.open = False
             page.update()
@@ -428,6 +535,8 @@ def main(page: ft.Page):
                 prompts_lista[idx]["espera_segundos"] = 30
             prompts_lista[idx]["post_accion"] = f_post_accion.value
             prompts_lista[idx]["archivo_salida"] = f_archivo.value
+            prompts_lista[idx]["antibot"] = f_antibot.value
+            prompts_lista[idx]["wpm_escritura"] = int(f_wpm_slider.value)
             guardar_prompts()
             refrescar_prompts()
             dlg.open = False
@@ -444,7 +553,9 @@ def main(page: ft.Page):
                     f_texto,
                     ft.Row([f_modo, f_espera]),
                     ft.Row([f_post_accion, f_archivo]),
-                ], spacing=10, scroll=ft.ScrollMode.AUTO, height=450),
+                    ft.Divider(),
+                    antibot_section,
+                ], spacing=10, scroll=ft.ScrollMode.AUTO, height=520),
             ),
             actions=[
                 ft.TextButton("Cancelar", on_click=cerrar_editor),
@@ -485,8 +596,7 @@ def main(page: ft.Page):
             refrescar_canales()
 
     # --- AUTOMATIZACIÓN DE CHATGPT ---
-    def abrir_y_pegar_chatgpt(prompt_final, modo="nueva"):
-        pyperclip.copy(prompt_final)
+    def abrir_y_pegar_chatgpt(prompt_final, modo="nueva", antibot=False, wpm=45):
         if modo == "nueva":
             if os.path.exists(PATH_CHATGPT):
                 os.startfile(PATH_CHATGPT)
@@ -495,7 +605,7 @@ def main(page: ft.Page):
         
         ventana_encontrada = None
         for _ in range(15):
-            time.sleep(1)
+            espera_humanizada(1) if antibot else time.sleep(1)
             windows = [w for w in gw.getAllWindows() if "ChatGPT" in w.title]
             if windows:
                 ventana_encontrada = windows[0]
@@ -504,10 +614,19 @@ def main(page: ft.Page):
         if ventana_encontrada:
             try:
                 ventana_encontrada.activate()
-                time.sleep(2) 
-                pyautogui.hotkey('ctrl', 'v')
-                time.sleep(0.5)
-                pyautogui.press('enter')
+                espera_humanizada(2) if antibot else time.sleep(2)
+                
+                if antibot:
+                    # Escritura humanizada: carácter por carácter
+                    escribir_humanizado(prompt_final, wpm=wpm)
+                    espera_humanizada(0.5)
+                    pyautogui.press('enter')
+                else:
+                    # Modo clásico: pegar de golpe
+                    pyperclip.copy(prompt_final)
+                    pyautogui.hotkey('ctrl', 'v')
+                    time.sleep(0.5)
+                    pyautogui.press('enter')
                 return True
             except: pass
         return False
@@ -524,25 +643,28 @@ def main(page: ft.Page):
             return titulos_reales[-1]
         return None
 
-    def extraer_respuesta_automatica():
+    def extraer_respuesta_automatica(antibot=False):
         try:
             windows = [w for w in gw.getAllWindows() if "ChatGPT" in w.title]
             if not windows: return None
             
             ventana = windows[0]
             ventana.activate()
-            time.sleep(1.5)
+            espera_humanizada(1.5) if antibot else time.sleep(1.5)
+
+            if antibot:
+                scroll_simulado()  # Simular lectura antes de copiar
 
             ancho, alto = ventana.size
             centro_x = ventana.left + (ancho // 2)
             centro_y = ventana.top + (alto // 2)
             pyautogui.click(centro_x, centro_y)
-            time.sleep(0.5)
+            espera_humanizada(0.5) if antibot else time.sleep(0.5)
 
             pyautogui.hotkey('ctrl', 'a')
-            time.sleep(0.5)
+            espera_humanizada(0.5) if antibot else time.sleep(0.5)
             pyautogui.hotkey('ctrl', 'c')
-            time.sleep(1.5)
+            espera_humanizada(1.5) if antibot else time.sleep(1.5)
 
             return pyperclip.paste()
         except:
@@ -603,6 +725,8 @@ def main(page: ft.Page):
                     modo = p.get("modo", "nueva")
                     espera = p.get("espera_segundos", 30)
                     archivo_salida = p.get("archivo_salida", "")
+                    ab = p.get("antibot", False)
+                    wpm = p.get("wpm_escritura", 45)
                     
                     # Preparar texto del prompt (reemplazar placeholders)
                     texto_prompt = p.get("texto", "")
@@ -615,19 +739,27 @@ def main(page: ft.Page):
                     with open(os.path.join(path, nombre_archivo_prompt), "w", encoding="utf-8") as f:
                         f.write(texto_prompt)
                     
-                    log_ui.controls.append(ft.Text(f"🌐 [{idx+1}/{len(habilitados)}] Enviando: {nombre_prompt}...", color=ft.Colors.BLUE))
+                    ab_tag = " 🛡️" if ab else ""
+                    log_ui.controls.append(ft.Text(f"🌐 [{idx+1}/{len(habilitados)}] Enviando: {nombre_prompt}{ab_tag}...", color=ft.Colors.BLUE))
                     page.update()
                     
-                    if abrir_y_pegar_chatgpt(texto_prompt, modo=modo):
-                        log_ui.controls.append(ft.Text(f"⏳ Esperando {espera}s generación...", italic=True))
+                    if abrir_y_pegar_chatgpt(texto_prompt, modo=modo, antibot=ab, wpm=wpm):
+                        log_ui.controls.append(ft.Text(f"⏳ Esperando ~{espera}s generación...", italic=True))
                         page.update()
-                        time.sleep(espera)
+                        
+                        if ab:
+                            # Espera humanizada + scroll de lectura durante la espera
+                            espera_humanizada(espera * 0.5)
+                            scroll_simulado()
+                            espera_humanizada(espera * 0.5)
+                        else:
+                            time.sleep(espera)
                         
                         # Post-acción
                         if post_accion == "extraer_titulo":
                             log_ui.controls.append(ft.Text("📋 Extrayendo título final...", color=ft.Colors.AMBER_800))
                             page.update()
-                            texto_copiado = extraer_respuesta_automatica()
+                            texto_copiado = extraer_respuesta_automatica(antibot=ab)
                             if texto_copiado:
                                 titulo_final = extraer_solo_el_titulo(texto_copiado)
                                 if titulo_final:
@@ -646,7 +778,7 @@ def main(page: ft.Page):
                         elif post_accion == "guardar_respuesta":
                             log_ui.controls.append(ft.Text(f"📋 Extrayendo respuesta para '{nombre_prompt}'...", color=ft.Colors.AMBER_800))
                             page.update()
-                            texto_resp = extraer_respuesta_automatica()
+                            texto_resp = extraer_respuesta_automatica(antibot=ab)
                             if texto_resp:
                                 if archivo_salida:
                                     with open(os.path.join(path, archivo_salida), "w", encoding="utf-8") as f:
@@ -664,7 +796,7 @@ def main(page: ft.Page):
                     
                     # Pausa entre prompts
                     if idx < len(habilitados) - 1:
-                        time.sleep(3)
+                        espera_humanizada(3) if ab else time.sleep(3)
 
                 log_ui.controls.append(ft.Divider())
                 log_ui.controls.append(ft.Text(f"✅ FINALIZADO: video {num}", weight="bold", color=ft.Colors.GREEN_800))

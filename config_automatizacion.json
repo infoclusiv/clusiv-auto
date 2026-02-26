@@ -8,16 +8,42 @@
             "espera_segundos": 30,
             "habilitado": true,
             "post_accion": "extraer_titulo",
-            "archivo_salida": "TITULO_FINAL.txt"
+            "archivo_salida": "TITULO_FINAL.txt",
+            "antibot": true,
+            "wpm_escritura": 80
         },
         {
             "nombre": "Investigación (5 Key Questions)",
             "texto": "I want you to follow these steps.\nStep 1:\nBased on the following title for a youtube video, generate an outline with 5 key questions that explore its central theme. The outline and questions should be structured in a way that keeps people's attention, as it will be used to create a video script. For this reason, it is necessary to begin with the most important and pressing question for the audience, followed by questions that help dive deeper into the content.\nFor each of these questions, conduct research using reputable web sources that provide verified information, such as:\n\nnytimes.com\n\nwashingtonpost.com\n\nnpr.org\n\nbbc.com\n\naxios.com\n\napnews.com\n\nbloomberg.com\n\nfoxnews.com\n\nnews.yahoo.com\n\nnbc.com\n\nreuters.com\n\ncnbc.com\n\nwsj.com\n\nfoxbusiness.com\n\nft.com\n\neconomist.com\n\nmarketwatch.com\n\ninvesting.com\n\nedition.cnn.com\n\npolitico.com\n\nusnews.com\n\npropublica.org\nYou can also include scientific papers, indexed journals, or official U.S. government websites. Avoid social media, youtube, unverified blogs, and low-credibility content. Cross-check at least three reliable sources to confirm each relevant fact.\n\nTitle for a YouTube video:\n[TITULO]",
             "modo": "nueva",
-            "espera_segundos": 60,
+            "espera_segundos": 40,
             "habilitado": true,
-            "post_accion": "guardar_respuesta",
-            "archivo_salida": "RESPUESTA_INVESTIGACION.txt"
+            "post_accion": "solo_enviar",
+            "archivo_salida": "",
+            "antibot": true,
+            "wpm_escritura": 80
+        },
+        {
+            "nombre": "Article 1st",
+            "texto": "Step 2 – take the 1st question from the list from Step 1 and write a 350 word article.",
+            "modo": "activa",
+            "espera_segundos": 30,
+            "habilitado": true,
+            "post_accion": "solo_enviar",
+            "archivo_salida": "",
+            "antibot": true,
+            "wpm_escritura": 80
+        },
+        {
+            "nombre": "Teleprompter Script Article 1",
+            "texto": "Format this into a 350 word teleprompter script. Format this article into a teleprompter script written in the style of a documentary narrator.\r\nKeep all facts accurate, but rewrite the text so it feels like a compelling story rather than a report.\r\nRequirements:\r\n•\tOpen each section with a dramatic hook or image that pulls the audience in.\r\n•\tUse metaphors, analogies, or vivid comparisons to make complex information easy to visualize.\r\n•\tMaintain a clear, conversational tone with short sentences and natural pauses.\r\n•\tHighlight contrasts (past vs. present, risk vs. reward, profit vs. security).\r\n•\tHumanize the numbers by showing their impact on people, companies, or nations.\r\n•\tBuild narrative tension as the story develops.\r\nIMPORTANT OUTPUT FORMAT:\r\nWrap your entire final teleprompter script strictly between the following markers:\r\n<<<START_TELEPROMPTER_SCRIPT>>>\r\nYour full script here\r\n<<<END_TELEPROMPTER_SCRIPT>>>\r\nDo not write anything before <<<START_TELEPROMPTER_SCRIPT>>>\r\nDo not write anything after <<<END_TELEPROMPTER_SCRIPT>>>\r\nOnly output the wrapped script.",
+            "modo": "activa",
+            "espera_segundos": 40,
+            "habilitado": true,
+            "post_accion": "solo_enviar",
+            "archivo_salida": "",
+            "antibot": true,
+            "wpm_escritura": 80
         }
     ]
 }
