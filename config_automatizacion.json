@@ -44,6 +44,94 @@
             "archivo_salida": "",
             "antibot": false,
             "wpm_escritura": 80
+        },
+        {
+            "nombre": "Article 2nd",
+            "texto": "Step 3 – take the 2nd question from the list from Step 1 and write a 350 word article.",
+            "modo": "activa",
+            "espera_segundos": 30,
+            "habilitado": true,
+            "antibot": true,
+            "wpm_escritura": 80,
+            "post_accion": "solo_enviar",
+            "archivo_salida": ""
+        },
+        {
+            "nombre": "Teleprompter Script Article 2",
+            "texto": "Format this into a 350 word teleprompter script. Format this article into a teleprompter script written in the style of a documentary narrator. \nKeep all facts accurate, but rewrite the text so it feels like a compelling story rather than a report. \n\nRequirements:\n- Open each section with a dramatic hook or image that pulls the audience in. \n- Use metaphors, analogies, or vivid comparisons to make complex information easy to visualize. \n- Maintain a clear, conversational tone with short sentences and natural pauses. \n- Highlight contrasts (past vs. present, risk vs. reward, profit vs. security). \n- Humanize the numbers by showing their impact on people, companies, or nations. \n- Build narrative tension as the story develops.\n\nI need you to analyze the end of the previous teleprompter script (for the first question). Then, create a short, natural, and fluid transition at the beginning of this new script. IMPORTANT: This transition must connect the two topics without repeating the last sentence or sentences of the previous script. It should feel like a seamless continuation, but with entirely new wording.",
+            "modo": "activa",
+            "espera_segundos": 30,
+            "habilitado": true,
+            "antibot": false,
+            "wpm_escritura": 45,
+            "post_accion": "solo_enviar",
+            "archivo_salida": ""
+        },
+        {
+            "nombre": "Aricle 3rd",
+            "texto": "Step 4 – take the 3rd question from the list from Step 1 and write a 350 word article.",
+            "modo": "activa",
+            "espera_segundos": 30,
+            "habilitado": true,
+            "antibot": true,
+            "wpm_escritura": 90,
+            "post_accion": "solo_enviar",
+            "archivo_salida": ""
+        },
+        {
+            "nombre": "Teleprompter Script Article 3",
+            "texto": "Format this into a 350 word teleprompter script. Format this article into a teleprompter script written in the style of a documentary narrator. \nKeep all facts accurate, but rewrite the text so it feels like a compelling story rather than a report. \n\nRequirements:\n- Open each section with a dramatic hook or image that pulls the audience in. \n- Use metaphors, analogies, or vivid comparisons to make complex information easy to visualize. \n- Maintain a clear, conversational tone with short sentences and natural pauses. \n- Highlight contrasts (past vs. present, risk vs. reward, profit vs. security). \n- Humanize the numbers by showing their impact on people, companies, or nations. \n- Build narrative tension as the story develops.\n\nI need you to analyze the end of the previous teleprompter script (for the second question). Then, create a short, natural, and fluid transition at the beginning of this new script. IMPORTANT: This transition must connect the two topics without repeating the last sentence or sentences of the previous script. It should feel like a seamless continuation, but with entirely new wording.",
+            "modo": "activa",
+            "espera_segundos": 30,
+            "habilitado": true,
+            "antibot": false,
+            "wpm_escritura": 45,
+            "post_accion": "solo_enviar",
+            "archivo_salida": ""
+        },
+        {
+            "nombre": "Article 4th",
+            "texto": "Step 5 – take the 4th question from the list from Step 1 and write a 350 word article.",
+            "modo": "activa",
+            "espera_segundos": 30,
+            "habilitado": true,
+            "antibot": true,
+            "wpm_escritura": 80,
+            "post_accion": "solo_enviar",
+            "archivo_salida": ""
+        },
+        {
+            "nombre": "Teleprompter Script Article 4",
+            "texto": "Format this into a 350 word teleprompter script. Format this article into a teleprompter script written in the style of a documentary narrator. \nKeep all facts accurate, but rewrite the text so it feels like a compelling story rather than a report. \n\nRequirements:\n- Open each section with a dramatic hook or image that pulls the audience in. \n- Use metaphors, analogies, or vivid comparisons to make complex information easy to visualize. \n- Maintain a clear, conversational tone with short sentences and natural pauses. \n- Highlight contrasts (past vs. present, risk vs. reward, profit vs. security). \n- Humanize the numbers by showing their impact on people, companies, or nations. \n- Build narrative tension as the story develops.\n\nI need you to analyze the end of the previous teleprompter script (for the third question). Then, create a short, natural, and fluid transition at the beginning of this new script. IMPORTANT: This transition must connect the two topics without repeating the last sentence or sentences of the previous script. It should feel like a seamless continuation, but with entirely new wording.",
+            "modo": "activa",
+            "espera_segundos": 30,
+            "habilitado": true,
+            "antibot": false,
+            "wpm_escritura": 45,
+            "post_accion": "solo_enviar",
+            "archivo_salida": ""
+        },
+        {
+            "nombre": "Article 5th",
+            "texto": "Step 6 – take the 5th question from the list from Step 1 and write a 350 word article.",
+            "modo": "activa",
+            "espera_segundos": 30,
+            "habilitado": true,
+            "antibot": true,
+            "wpm_escritura": 75,
+            "post_accion": "solo_enviar",
+            "archivo_salida": ""
+        },
+        {
+            "nombre": "Teleprompter Script Article 5",
+            "texto": "Format this into a 350 word teleprompter script. Format this article into a teleprompter script written in the style of a documentary narrator. \nKeep all facts accurate, but rewrite the text so it feels like a compelling story rather than a report. \n\nRequirements:\n- Open each section with a dramatic hook or image that pulls the audience in. \n- Use metaphors, analogies, or vivid comparisons to make complex information easy to visualize. \n- Maintain a clear, conversational tone with short sentences and natural pauses. \n- Highlight contrasts (past vs. present, risk vs. reward, profit vs. security). \n- Humanize the numbers by showing their impact on people, companies, or nations. \n- Build narrative tension as the story develops.\n\nI need you to analyze the end of the previous teleprompter script (for the fourth question). Then, create a short, natural, and fluid transition at the beginning of this new script. IMPORTANT: This transition must connect the two topics without repeating the last sentence or sentences of the previous script. It should feel like a seamless continuation, but with entirely new wording.\n\nTo conclude the script, please add a brief farewell and tell our viewers that we want to hear their opinions and will be reading the comments.",
+            "modo": "activa",
+            "espera_segundos": 30,
+            "habilitado": true,
+            "antibot": false,
+            "wpm_escritura": 45,
+            "post_accion": "solo_enviar",
+            "archivo_salida": ""
         }
     ]
 }
