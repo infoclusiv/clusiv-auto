@@ -111,7 +111,7 @@ PROMPTS_DEFAULT = [
         "espera_segundos": 30,
         "habilitado": True,
         "antibot": True,
-        "wpm_escritura": 45,
+        "wpm_escritura": 200,
         "post_accion": "extraer_titulo",
         "archivo_salida": "TITULO_FINAL.txt"
     },
@@ -122,7 +122,7 @@ PROMPTS_DEFAULT = [
         "espera_segundos": 60,
         "habilitado": True,
         "antibot": True,
-        "wpm_escritura": 45,
+        "wpm_escritura": 200,
         "post_accion": "guardar_respuesta",
         "archivo_salida": "RESPUESTA_INVESTIGACION.txt"
     }
@@ -156,7 +156,7 @@ def cargar_toda_config():
                     "espera_segundos": 30,
                     "habilitado": True,
                     "antibot": True,
-                    "wpm_escritura": 45,
+                    "wpm_escritura": 200,
                     "post_accion": "extraer_titulo",
                     "archivo_salida": "TITULO_FINAL.txt"
                 })
@@ -167,7 +167,7 @@ def cargar_toda_config():
                     "espera_segundos": 60,
                     "habilitado": True,
                     "antibot": True,
-                    "wpm_escritura": 45,
+                    "wpm_escritura": 200,
                     "post_accion": "guardar_respuesta",
                     "archivo_salida": "RESPUESTA_INVESTIGACION.txt"
                 })
@@ -183,7 +183,7 @@ def cargar_toda_config():
                         p["antibot"] = True
                         migrado = True
                     if "wpm_escritura" not in p:
-                        p["wpm_escritura"] = 45
+                        p["wpm_escritura"] = 200
                         migrado = True
                 if migrado:
                     with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
@@ -229,26 +229,126 @@ def eliminar_canal_db(ch_id):
 
 # --- 2.5 FUNCIONES ANTI-BOT ---
 def escribir_humanizado(texto, wpm=45, stop_event=None):
-    """Escribe texto carácter por carácter simulando velocidad humana.
-    Pausas asimétricas: espacio y Enter tardan más que letras normales.
-    Se detiene si stop_event está activado."""
-    wpm_real = wpm * random.uniform(0.8, 1.2)
+    """Router principal de escritura. Selecciona estrategia según WPM.
+    
+    Tiers:
+      20-50  WPM → Carácter por carácter (máximo stealth)
+      51-120 WPM → Palabra por palabra via clipboard
+      121-300 WPM → Chunks de líneas via clipboard
+      301-500 WPM → Paste directo con micro-pausa
+    """
+    if wpm >= 301:
+        return _escribir_paste_directo(texto, stop_event)
+    elif wpm >= 121:
+        return _escribir_por_chunks_linea(texto, wpm, stop_event)
+    elif wpm >= 51:
+        return _escribir_por_palabras(texto, wpm, stop_event)
+    else:
+        return _escribir_caracter(texto, wpm, stop_event)
+
+
+def _escribir_caracter(texto, wpm=45, stop_event=None):
+    """Tier 🐢 Stealth (20-50 WPM): Carácter por carácter.
+    Multiplicadores REDUCIDOS vs la versión original para que sea más fiel al WPM real."""
+    wpm_real = wpm * random.uniform(0.9, 1.1)
     base_delay = 60.0 / (wpm_real * 5)
     for char in texto:
         if stop_event and stop_event.is_set():
             return False
         if char == ' ':
-            time.sleep(random.uniform(base_delay * 1.8, base_delay * 3.5))
+            time.sleep(random.uniform(base_delay * 1.0, base_delay * 1.5))
             pyautogui.press('space')
         elif char == '\n':
-            time.sleep(random.uniform(base_delay * 3.0, base_delay * 5.0))
+            time.sleep(random.uniform(base_delay * 1.2, base_delay * 2.0))
             pyautogui.press('enter')
         elif char == '\t':
-            time.sleep(random.uniform(base_delay * 0.5, base_delay * 1.0))
+            time.sleep(random.uniform(base_delay * 0.3, base_delay * 0.6))
             pyautogui.press('tab')
         else:
-            time.sleep(random.uniform(base_delay * 0.5, base_delay * 1.5))
-            pyautogui.typewrite(char, interval=0) if char.isascii() and char.isprintable() else pyautogui.hotkey(char)
+            time.sleep(random.uniform(base_delay * 0.6, base_delay * 1.1))
+            if char.isascii() and char.isprintable():
+                pyautogui.typewrite(char, interval=0)
+            else:
+                try:
+                    pyperclip.copy(char)
+                    pyautogui.hotkey('ctrl', 'v')
+                except Exception:
+                    pass
+    return True
+
+
+def _escribir_por_palabras(texto, wpm=80, stop_event=None):
+    """Tier 🚶 Normal (51-120 WPM): Palabra por palabra via clipboard.
+    Cada palabra se pega con Ctrl+V, luego espacio/newline se teclea manual.
+    Mucho más rápido que char-by-char porque clipboard es instantáneo."""
+    
+    tokens = re.split(r'(\s)', texto)
+    palabra_delay = 60.0 / wpm
+    
+    for token in tokens:
+        if stop_event and stop_event.is_set():
+            return False
+        
+        if token == '':
+            continue
+        elif token == ' ':
+            time.sleep(random.uniform(palabra_delay * 0.1, palabra_delay * 0.3))
+            pyautogui.press('space')
+        elif token == '\n':
+            time.sleep(random.uniform(palabra_delay * 0.2, palabra_delay * 0.5))
+            pyautogui.press('enter')
+        elif token == '\t':
+            time.sleep(random.uniform(palabra_delay * 0.05, palabra_delay * 0.15))
+            pyautogui.press('tab')
+        elif token.strip() == '':
+            for ch in token:
+                if stop_event and stop_event.is_set():
+                    return False
+                pyautogui.press('space')
+                time.sleep(random.uniform(0.01, 0.05))
+        else:
+            time.sleep(random.uniform(palabra_delay * 0.3, palabra_delay * 0.8))
+            pyperclip.copy(token)
+            pyautogui.hotkey('ctrl', 'v')
+            time.sleep(random.uniform(0.02, 0.06))
+    
+    return True
+
+
+def _escribir_por_chunks_linea(texto, wpm=200, stop_event=None):
+    """Tier 🏃 Rápido (121-300 WPM): Chunks de líneas/frases via clipboard.
+    Pega líneas completas con pausas breves entre ellas."""
+    
+    lineas = texto.split('\n')
+    line_delay = max(0.05, 60.0 / wpm)
+    
+    for i, linea in enumerate(lineas):
+        if stop_event and stop_event.is_set():
+            return False
+        
+        if linea:
+            pyperclip.copy(linea)
+            pyautogui.hotkey('ctrl', 'v')
+            time.sleep(random.uniform(0.02, 0.08))
+        
+        if i < len(lineas) - 1:
+            time.sleep(random.uniform(line_delay * 0.5, line_delay * 1.2))
+            pyautogui.press('enter')
+    
+    return True
+
+
+def _escribir_paste_directo(texto, stop_event=None):
+    """Tier ⚡ Turbo (301-500 WPM): Paste directo completo.
+    Pega todo el texto de una vez. Máxima velocidad, mínimo stealth."""
+    if stop_event and stop_event.is_set():
+        return False
+    
+    pyperclip.copy(texto)
+    time.sleep(random.uniform(0.1, 0.3))
+    pyautogui.hotkey('ctrl', 'v')
+    time.sleep(random.uniform(0.1, 0.3))
+    
     return True
 
 def espera_humanizada(segundos, stop_event=None):
@@ -438,7 +538,15 @@ def main(page: ft.Page):
             # — Construir badges del pipeline —
             badges = []
             if antibot:
-                badges.append(crear_badge(f"🛡️ {wpm} WPM", ft.Colors.TEAL_800, ft.Colors.TEAL_50, ft.Colors.TEAL_200))
+                if wpm >= 301:
+                    tier_icon = "⚡"
+                elif wpm >= 121:
+                    tier_icon = "🏃"
+                elif wpm >= 51:
+                    tier_icon = "🚶"
+                else:
+                    tier_icon = "🐢"
+                badges.append(crear_badge(f"🛡️ {wpm} WPM {tier_icon}", ft.Colors.TEAL_800, ft.Colors.TEAL_50, ft.Colors.TEAL_200))
 
             modo_txt = "🆕 Nueva" if modo == "nueva" else "📌 Activa"
             badges.append(crear_badge(modo_txt, ft.Colors.BLUE_800, ft.Colors.BLUE_50, ft.Colors.BLUE_200))
@@ -568,7 +676,7 @@ def main(page: ft.Page):
             "espera_segundos": 30,
             "habilitado": True,
             "antibot": True,
-            "wpm_escritura": 45,
+            "wpm_escritura": 200,
             "post_accion": "solo_enviar",
             "archivo_salida": ""
         }
@@ -626,16 +734,27 @@ def main(page: ft.Page):
             active_color=ft.Colors.TEAL_600,
         )
         
-        wpm_value = p.get("wpm_escritura", 45)
-        f_wpm_label = ft.Text(f"{wpm_value} WPM", size=13, weight="bold", color=ft.Colors.TEAL_700)
+        wpm_value = p.get("wpm_escritura", 200)
+        
+        def get_tier_label(val):
+            if val >= 301:
+                return f"{val} WPM ⚡ Turbo"
+            elif val >= 121:
+                return f"{val} WPM 🏃 Rápido"
+            elif val >= 51:
+                return f"{val} WPM 🚶 Palabra"
+            else:
+                return f"{val} WPM 🐢 Stealth"
+        
+        f_wpm_label = ft.Text(get_tier_label(wpm_value), size=13, weight="bold", color=ft.Colors.TEAL_700)
         
         def on_wpm_change(e):
             val = int(e.control.value)
-            f_wpm_label.value = f"{val} WPM"
+            f_wpm_label.value = get_tier_label(val)
             page.update()
         
         f_wpm_slider = ft.Slider(
-            min=20, max=120, divisions=20,
+            min=20, max=500, divisions=48,
             value=wpm_value,
             label="{value} WPM",
             active_color=ft.Colors.TEAL_600,
@@ -652,7 +771,7 @@ def main(page: ft.Page):
                     f_wpm_label,
                 ], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Text(
-                    "Lento ← 20 WPM ··· 120 WPM → Rápido",
+                    "🐢 20 ← Stealth | 51 → Palabra 🚶 | 121 → Rápido 🏃 | 301 → Turbo ⚡ → 500",
                     size=10, color=ft.Colors.GREY_500, italic=True,
                     text_align=ft.TextAlign.CENTER,
                 ),
