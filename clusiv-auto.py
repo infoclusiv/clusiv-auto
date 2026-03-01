@@ -371,8 +371,8 @@ def main(page: ft.Page):
         btn_detener.bgcolor = ft.Colors.RED_700
         page.update()
 
-    # Prompt Manager UI container
-    prompts_ui = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO)
+    # Prompt Manager UI container — Gallery grid
+    prompts_ui = ft.ResponsiveRow(spacing=10, run_spacing=10)
 
     def show_snack(msg, color=ft.Colors.GREEN):
         page.overlay.append(ft.SnackBar(content=ft.Text(msg), bgcolor=color))
@@ -407,57 +407,136 @@ def main(page: ft.Page):
         
         return " → ".join(partes)
 
+    def crear_badge(texto, color_texto, color_fondo, color_borde):
+        """Crea un badge/chip compacto para las tarjetas de galería."""
+        return ft.Container(
+            content=ft.Text(texto, size=10, color=color_texto, weight=ft.FontWeight.W_500),
+            bgcolor=color_fondo,
+            border=ft.border.all(1, color_borde),
+            border_radius=12,
+            padding=ft.padding.symmetric(horizontal=8, vertical=3),
+        )
+
     def guardar_prompts():
         """Guarda la lista de prompts en el config."""
         guardar_config(prompts=prompts_lista)
 
     def refrescar_prompts():
-        """Reconstruye la UI del prompt manager."""
+        """Reconstruye la UI del prompt manager en formato galería."""
         prompts_ui.controls.clear()
+        txt_prompt_count.value = f"{len(prompts_lista)} prompts"
         for idx, p in enumerate(prompts_lista):
             nombre = p.get("nombre", f"Prompt {idx+1}")
             habilitado = p.get("habilitado", True)
-            pipeline = obtener_pipeline_visual(p)
-            
-            # Tarjeta de cada prompt
+            antibot = p.get("antibot", False)
+            wpm = p.get("wpm_escritura", 45)
+            modo = p.get("modo", "nueva")
+            espera = p.get("espera_segundos", 30)
+            accion = p.get("post_accion", "solo_enviar")
+            archivo = p.get("archivo_salida", "")
+
+            # — Construir badges del pipeline —
+            badges = []
+            if antibot:
+                badges.append(crear_badge(f"🛡️ {wpm} WPM", ft.Colors.TEAL_800, ft.Colors.TEAL_50, ft.Colors.TEAL_200))
+
+            modo_txt = "🆕 Nueva" if modo == "nueva" else "📌 Activa"
+            badges.append(crear_badge(modo_txt, ft.Colors.BLUE_800, ft.Colors.BLUE_50, ft.Colors.BLUE_200))
+            badges.append(crear_badge(f"⏳ {espera}s", ft.Colors.ORANGE_800, ft.Colors.ORANGE_50, ft.Colors.ORANGE_200))
+
+            if accion == "extraer_titulo":
+                badges.append(crear_badge("📥 Título", ft.Colors.PURPLE_800, ft.Colors.PURPLE_50, ft.Colors.PURPLE_200))
+            elif accion == "guardar_respuesta":
+                badges.append(crear_badge("📥 Respuesta", ft.Colors.PURPLE_800, ft.Colors.PURPLE_50, ft.Colors.PURPLE_200))
+
+            # — Fila de archivo de salida (condicional) —
+            archivo_row = []
+            if archivo:
+                archivo_row.append(
+                    ft.Text(f"💾 {archivo}", size=10, color=ft.Colors.GREY_600, italic=True,
+                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+                )
+
+            # — Número de orden —
+            orden_badge = ft.Container(
+                content=ft.Text(f"#{idx+1}", size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                bgcolor=ft.Colors.BLUE_GREY_400 if habilitado else ft.Colors.GREY_400,
+                border_radius=12,
+                width=26, height=26,
+                alignment=ft.alignment.center,
+            )
+
+            # — Colores según estado —
+            borde_color = ft.Colors.GREEN_400 if habilitado else ft.Colors.GREY_300
+            fondo_color = ft.Colors.WHITE if habilitado else ft.Colors.GREY_100
+            nombre_color = ft.Colors.BLACK if habilitado else ft.Colors.GREY_500
+
+            # — Tarjeta compacta de galería —
             card = ft.Container(
+                col={"xs": 12, "sm": 6, "md": 4},
                 content=ft.Column([
+                    # Fila 1: Orden + Switch + Nombre
                     ft.Row([
+                        orden_badge,
                         ft.Switch(
                             value=habilitado,
                             active_color=ft.Colors.GREEN_600,
                             on_change=lambda e, i=idx: toggle_prompt(i, e.control.value),
+                            scale=0.8,
                         ),
-                        ft.Text(nombre, weight="bold", size=14, expand=True,
-                                color=ft.Colors.BLACK if habilitado else ft.Colors.GREY_500),
+                        ft.Text(
+                            nombre, weight=ft.FontWeight.BOLD, size=13, expand=True,
+                            color=nombre_color,
+                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                    ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+
+                    # Fila 2: Badges del pipeline
+                    ft.Row(badges, wrap=True, spacing=4, run_spacing=4),
+
+                    # Fila 3: Archivo de salida (si existe)
+                    *archivo_row,
+
+                    # Fila 4: Botones de acción
+                    ft.Row([
                         ft.IconButton(
                             ft.Icons.EDIT_NOTE, icon_color=ft.Colors.BLUE_600, tooltip="Editar",
-                            on_click=lambda _, i=idx: abrir_editor_prompt(i)
+                            icon_size=18,
+                            on_click=lambda _, i=idx: abrir_editor_prompt(i),
+                            style=ft.ButtonStyle(padding=ft.padding.all(4)),
                         ),
                         ft.IconButton(
                             ft.Icons.ARROW_UPWARD, icon_color=ft.Colors.GREY_600, tooltip="Subir",
+                            icon_size=18,
                             on_click=lambda _, i=idx: mover_prompt(i, -1),
-                            disabled=(idx == 0)
+                            disabled=(idx == 0),
+                            style=ft.ButtonStyle(padding=ft.padding.all(4)),
                         ),
                         ft.IconButton(
                             ft.Icons.ARROW_DOWNWARD, icon_color=ft.Colors.GREY_600, tooltip="Bajar",
+                            icon_size=18,
                             on_click=lambda _, i=idx: mover_prompt(i, 1),
-                            disabled=(idx == len(prompts_lista) - 1)
+                            disabled=(idx == len(prompts_lista) - 1),
+                            style=ft.ButtonStyle(padding=ft.padding.all(4)),
                         ),
                         ft.IconButton(
                             ft.Icons.DELETE_OUTLINE, icon_color=ft.Colors.RED_400, tooltip="Eliminar",
-                            on_click=lambda _, i=idx: eliminar_prompt(i)
+                            icon_size=18,
+                            on_click=lambda _, i=idx: eliminar_prompt(i),
+                            style=ft.ButtonStyle(padding=ft.padding.all(4)),
                         ),
-                    ], alignment=ft.MainAxisAlignment.START),
-                    ft.Container(
-                        content=ft.Text(pipeline, size=11, color=ft.Colors.BLUE_GREY_600, italic=True),
-                        padding=ft.padding.only(left=50)
-                    ),
-                ], spacing=2),
-                padding=12,
-                border=ft.border.all(1, ft.Colors.GREEN_300 if habilitado else ft.Colors.GREY_300),
-                border_radius=8,
-                bgcolor=ft.Colors.WHITE if habilitado else ft.Colors.GREY_100,
+                    ], alignment=ft.MainAxisAlignment.END, spacing=0),
+                ], spacing=8, tight=True),
+                padding=14,
+                border_radius=10,
+                border=ft.border.all(1.5, borde_color),
+                bgcolor=fondo_color,
+                shadow=ft.BoxShadow(
+                    spread_radius=0,
+                    blur_radius=4,
+                    color=ft.Colors.with_opacity(0.06, ft.Colors.BLACK),
+                    offset=ft.Offset(0, 2),
+                ),
             )
             prompts_ui.controls.append(card)
         page.update()
@@ -1023,10 +1102,25 @@ def main(page: ft.Page):
         ft.ElevatedButton("Ruta de Proyectos", icon=ft.Icons.FOLDER_OPEN, on_click=lambda _: picker.get_directory_path()),
     ])))
 
+    txt_prompt_count = ft.Text(
+        f"{len(prompts_lista)} prompts",
+        size=12, color=ft.Colors.GREY_600, italic=True,
+    )
+
+    prompts_gallery_scroll = ft.Container(
+        content=ft.Column(
+            controls=[prompts_ui],
+            scroll=ft.ScrollMode.AUTO,
+        ),
+        height=450,
+        border_radius=8,
+    )
+
     tile_prompts = ft.Card(col={"md": 12}, content=ft.Container(padding=20, content=ft.Column([
         ft.Row([
             ft.Icon(ft.Icons.AUTO_FIX_HIGH, color=ft.Colors.PURPLE_600),
             ft.Text("PROMPT MANAGER", weight="bold", size=16, expand=True),
+            txt_prompt_count,
             ft.ElevatedButton(
                 "Agregar Prompt",
                 icon=ft.Icons.ADD_CIRCLE_OUTLINE,
@@ -1034,9 +1128,10 @@ def main(page: ft.Page):
                 bgcolor=ft.Colors.PURPLE_600,
                 color="white",
             ),
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+           vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ft.Divider(),
-        prompts_ui
+        prompts_gallery_scroll,
     ])))
 
     picker = ft.FilePicker(on_result=lambda e: (guardar_config(ruta=e.path), page.update()) if e.path else None)
