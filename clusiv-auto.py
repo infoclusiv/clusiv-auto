@@ -490,7 +490,103 @@ def main(page: ft.Page):
     input_id = ft.TextField(label="ID del Canal", expand=True)
     input_name = ft.TextField(label="Nombre del Canal", expand=True)
     lista_canales_ui = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, height=400)
-    log_ui = ft.Column(spacing=5)
+    log_ui = ft.Column(
+        spacing=6,
+        scroll=ft.ScrollMode.AUTO,
+        auto_scroll=True,
+    )
+    log_container = ft.Container(
+        content=log_ui,
+        height=350,
+        border_radius=10,
+        bgcolor="#F8F9FA",
+        border=ft.border.all(1, ft.Colors.GREY_300),
+        padding=ft.padding.all(10),
+    )
+
+    def log_msg(texto, color=None, weight=None, italic=False, is_divider=False):
+        """Agrega un mensaje estilo chat-bubble al log con timestamp y auto-scroll."""
+        if is_divider:
+            log_ui.controls.append(
+                ft.Container(
+                    content=ft.Divider(height=1, color=ft.Colors.GREY_300),
+                    padding=ft.padding.symmetric(vertical=4),
+                )
+            )
+            page.update()
+            return
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+
+        # Determinar color de fondo del bubble según tipo de mensaje
+        if color == ft.Colors.RED or color == ft.Colors.RED_700:
+            bubble_bg = "#FFF5F5"
+            border_color = ft.Colors.RED_200
+        elif color == ft.Colors.GREEN_700 or color == ft.Colors.GREEN_800:
+            bubble_bg = "#F0FFF4"
+            border_color = ft.Colors.GREEN_200
+        elif (
+            color == ft.Colors.ORANGE
+            or color == ft.Colors.ORANGE_700
+            or color == ft.Colors.ORANGE_800
+        ):
+            bubble_bg = "#FFFAF0"
+            border_color = ft.Colors.ORANGE_200
+        elif color == ft.Colors.BLUE or color == ft.Colors.BLUE_800:
+            bubble_bg = "#EBF8FF"
+            border_color = ft.Colors.BLUE_200
+        elif color == ft.Colors.AMBER_800:
+            bubble_bg = "#FFFBEB"
+            border_color = ft.Colors.AMBER_200
+        else:
+            bubble_bg = ft.Colors.WHITE
+            border_color = ft.Colors.GREY_200
+
+        bubble = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Text(
+                        timestamp,
+                        size=9,
+                        color=ft.Colors.GREY_400,
+                        italic=True,
+                        no_wrap=True,
+                    ),
+                    ft.Text(
+                        texto,
+                        size=12,
+                        color=color,
+                        weight=weight,
+                        italic=italic,
+                        expand=True,
+                        selectable=True,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
+            padding=ft.padding.symmetric(horizontal=12, vertical=8),
+            border_radius=10,
+            bgcolor=bubble_bg,
+            border=ft.border.all(1, border_color),
+            shadow=ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=2,
+                color=ft.Colors.with_opacity(0.04, ft.Colors.BLACK),
+                offset=ft.Offset(0, 1),
+            ),
+            animate_opacity=ft.Animation(300, ft.AnimationCurve.EASE_IN),
+        )
+
+        log_ui.controls.append(bubble)
+
+        # Limitar mensajes para rendimiento (los más antiguos se eliminan)
+        MAX_LOG_MESSAGES = 150
+        if len(log_ui.controls) > MAX_LOG_MESSAGES:
+            log_ui.controls = log_ui.controls[-MAX_LOG_MESSAGES:]
+
+        page.update()
+
     prg = ft.ProgressBar(width=400, visible=False, color=ft.Colors.GREEN_700)
     txt_proximo = ft.Text(size=14, weight="bold", color=ft.Colors.BLUE_GREY_700)
 
@@ -514,13 +610,11 @@ def main(page: ft.Page):
         btn_detener.disabled = True
         btn_detener.text = "DETENIENDO..."
         btn_detener.bgcolor = ft.Colors.GREY_500
-        log_ui.controls.append(
-            ft.Text(
-                "⛔ Solicitud de detención enviada. Esperando que el paso actual finalice...",
-                color=ft.Colors.ORANGE_800,
-                weight="bold",
-                italic=True,
-            )
+        log_msg(
+            "⛔ Solicitud de detención enviada. Esperando que el paso actual finalice...",
+            color=ft.Colors.ORANGE_800,
+            weight="bold",
+            italic=True,
         )
         page.update()
 
@@ -1342,10 +1436,10 @@ def main(page: ft.Page):
         # Limpiar señal de cancelación y preparar UI
         stop_event.clear()
         log_ui.controls.clear()
-        log_ui.controls.append(ft.Text("🚀 Iniciando flujo completo...", italic=True))
         prg.visible = True
         set_estado_ejecutando(True)
         page.update()
+        log_msg("🚀 Iniciando flujo completo...", italic=True)
 
         def proceso_hilo():
             detenido = False
@@ -1357,10 +1451,7 @@ def main(page: ft.Page):
                     if stop_event.is_set():
                         detenido = True
                         break
-                    log_ui.controls.append(
-                        ft.Text(f"Analizando: {ch_name}...", size=12)
-                    )
-                    page.update()
+                    log_msg(f"🔍 Analizando: {ch_name}...")
                     data = analizar_rendimiento_canal(ch_id)
                     if data and data["ganadores"]:
                         v = data["ganadores"][0]
@@ -1368,12 +1459,10 @@ def main(page: ft.Page):
                         ganadores_totales.append(v)
 
                 if detenido or stop_event.is_set():
-                    log_ui.controls.append(
-                        ft.Text(
-                            "⛔ Flujo detenido por el usuario durante el análisis de canales.",
-                            color=ft.Colors.RED_700,
-                            weight="bold",
-                        )
+                    log_msg(
+                        "⛔ Flujo detenido por el usuario durante el análisis de canales.",
+                        color=ft.Colors.RED_700,
+                        weight="bold",
                     )
                     prg.visible = False
                     set_estado_ejecutando(False)
@@ -1381,11 +1470,9 @@ def main(page: ft.Page):
                     return
 
                 if not ganadores_totales:
-                    log_ui.controls.append(
-                        ft.Text(
-                            "❌ No se encontraron videos ganadores.",
-                            color=ft.Colors.RED,
-                        )
+                    log_msg(
+                        "❌ No se encontraron videos ganadores.",
+                        color=ft.Colors.RED,
                     )
                     prg.visible = False
                     set_estado_ejecutando(False)
@@ -1436,13 +1523,10 @@ def main(page: ft.Page):
                         f.write(texto_prompt)
 
                     ab_tag = " 🛡️" if ab else ""
-                    log_ui.controls.append(
-                        ft.Text(
-                            f"🌐 [{idx + 1}/{len(habilitados)}] Enviando: {nombre_prompt}{ab_tag}...",
-                            color=ft.Colors.BLUE,
-                        )
+                    log_msg(
+                        f"🌐 [{idx + 1}/{len(habilitados)}] Enviando: {nombre_prompt}{ab_tag}...",
+                        color=ft.Colors.BLUE,
                     )
-                    page.update()
 
                     if stop_event.is_set():
                         detenido = True
@@ -1457,12 +1541,7 @@ def main(page: ft.Page):
                         break
 
                     if envio_ok:
-                        log_ui.controls.append(
-                            ft.Text(
-                                f"⏳ Esperando ~{espera}s generación...", italic=True
-                            )
-                        )
-                        page.update()
+                        log_msg(f"⏳ Esperando ~{espera}s generación...", italic=True)
 
                         if ab:
                             if not espera_humanizada(espera * 0.5, stop_event):
@@ -1486,13 +1565,10 @@ def main(page: ft.Page):
 
                         # Post-acción
                         if post_accion == "extraer_titulo":
-                            log_ui.controls.append(
-                                ft.Text(
-                                    "📋 Extrayendo título final...",
-                                    color=ft.Colors.AMBER_800,
-                                )
+                            log_msg(
+                                "📋 Extrayendo título final...",
+                                color=ft.Colors.AMBER_800,
                             )
-                            page.update()
                             texto_copiado = extraer_respuesta_automatica(antibot=ab)
 
                             if stop_event.is_set():
@@ -1510,12 +1586,10 @@ def main(page: ft.Page):
                                             encoding="utf-8",
                                         ) as f:
                                             f.write(titulo_final)
-                                    log_ui.controls.append(
-                                        ft.Text(
-                                            f"🎯 Título detectado: {titulo_final}",
-                                            color=ft.Colors.GREEN_700,
-                                            weight="bold",
-                                        )
+                                    log_msg(
+                                        f"🎯 Título detectado: {titulo_final}",
+                                        color=ft.Colors.GREEN_700,
+                                        weight="bold",
                                     )
                                 else:
                                     with open(
@@ -1524,28 +1598,21 @@ def main(page: ft.Page):
                                         encoding="utf-8",
                                     ) as f:
                                         f.write(texto_copiado)
-                                    log_ui.controls.append(
-                                        ft.Text(
-                                            "⚠ No se encontró el título real. Se guardó Raw.",
-                                            color=ft.Colors.ORANGE,
-                                        )
+                                    log_msg(
+                                        "⚠ No se encontró el título real. Se guardó Raw.",
+                                        color=ft.Colors.ORANGE,
                                     )
                             else:
-                                log_ui.controls.append(
-                                    ft.Text(
-                                        "❌ Error: Portapapeles vacío.",
-                                        color=ft.Colors.RED,
-                                    )
+                                log_msg(
+                                    "❌ Error: Portapapeles vacío.",
+                                    color=ft.Colors.RED,
                                 )
 
                         elif post_accion == "guardar_respuesta":
-                            log_ui.controls.append(
-                                ft.Text(
-                                    f"📋 Extrayendo respuesta para '{nombre_prompt}'...",
-                                    color=ft.Colors.AMBER_800,
-                                )
+                            log_msg(
+                                f"📋 Extrayendo respuesta para '{nombre_prompt}'...",
+                                color=ft.Colors.AMBER_800,
                             )
-                            page.update()
                             texto_resp = extraer_respuesta_automatica(antibot=ab)
 
                             if stop_event.is_set():
@@ -1560,39 +1627,29 @@ def main(page: ft.Page):
                                         encoding="utf-8",
                                     ) as f:
                                         f.write(texto_resp)
-                                log_ui.controls.append(
-                                    ft.Text(
-                                        f"✅ Respuesta guardada: {archivo_salida}",
-                                        color=ft.Colors.GREEN_700,
-                                        weight="bold",
-                                    )
+                                log_msg(
+                                    f"✅ Respuesta guardada: {archivo_salida}",
+                                    color=ft.Colors.GREEN_700,
+                                    weight="bold",
                                 )
                             else:
-                                log_ui.controls.append(
-                                    ft.Text(
-                                        f"❌ Error al extraer respuesta de '{nombre_prompt}'.",
-                                        color=ft.Colors.RED,
-                                    )
+                                log_msg(
+                                    f"❌ Error al extraer respuesta de '{nombre_prompt}'.",
+                                    color=ft.Colors.RED,
                                 )
                         else:
-                            log_ui.controls.append(
-                                ft.Text(
-                                    f"✅ Prompt '{nombre_prompt}' enviado.",
-                                    color=ft.Colors.GREEN_700,
-                                )
+                            log_msg(
+                                f"✅ Prompt '{nombre_prompt}' enviado.",
+                                color=ft.Colors.GREEN_700,
                             )
                     else:
                         if stop_event.is_set():
                             detenido = True
                             break
-                        log_ui.controls.append(
-                            ft.Text(
-                                f"❌ Error: No se pudo enviar '{nombre_prompt}'.",
-                                color=ft.Colors.RED,
-                            )
+                        log_msg(
+                            f"❌ Error: No se pudo enviar '{nombre_prompt}'.",
+                            color=ft.Colors.RED,
                         )
-
-                    page.update()
 
                     # Pausa entre prompts
                     if idx < len(habilitados) - 1:
@@ -1606,52 +1663,39 @@ def main(page: ft.Page):
                                 break
 
                 # Mensaje final
-                log_ui.controls.append(ft.Divider())
+                log_msg("", is_divider=True)
                 if detenido or stop_event.is_set():
-                    log_ui.controls.append(
-                        ft.Text(
-                            f"⛔ FLUJO DETENIDO por el usuario en video {num}",
-                            weight="bold",
-                            color=ft.Colors.RED_700,
-                        )
+                    log_msg(
+                        f"⛔ FLUJO DETENIDO por el usuario en video {num}",
+                        color=ft.Colors.RED_700,
+                        weight="bold",
                     )
                 else:
-                    log_ui.controls.append(
-                        ft.Text(
-                            "📄 Buscando all_text.txt para extraer script...",
-                            color=ft.Colors.BLUE_800,
-                            italic=True,
-                        )
+                    log_msg(
+                        "📄 Buscando all_text.txt para extraer script...",
+                        color=ft.Colors.BLUE_800,
+                        italic=True,
                     )
-                    page.update()
 
                     exito, mensaje = extraer_script_de_all_text(path)
 
                     if exito:
-                        log_ui.controls.append(
-                            ft.Text(
-                                f"✅ {mensaje}",
-                                color=ft.Colors.GREEN_700,
-                                weight="bold",
-                            )
+                        log_msg(
+                            f"✅ {mensaje}",
+                            color=ft.Colors.GREEN_700,
+                            weight="bold",
                         )
                     else:
-                        log_ui.controls.append(
-                            ft.Text(f"⚠ {mensaje}", color=ft.Colors.ORANGE_700)
-                        )
+                        log_msg(f"⚠ {mensaje}", color=ft.Colors.ORANGE_700)
 
-                    log_ui.controls.append(
-                        ft.Text(
-                            f"✅ FINALIZADO: video {num}",
-                            weight="bold",
-                            color=ft.Colors.GREEN_800,
-                        )
+                    log_msg(
+                        f"✅ FINALIZADO: video {num}",
+                        color=ft.Colors.GREEN_800,
+                        weight="bold",
                     )
 
             except Exception as ex:
-                log_ui.controls.append(
-                    ft.Text(f"Error: {str(ex)}", color=ft.Colors.RED)
-                )
+                log_msg(f"❌ Error: {str(ex)}", color=ft.Colors.RED)
 
             prg.visible = False
             txt_proximo.value = (
@@ -1718,7 +1762,23 @@ def main(page: ft.Page):
                     btn_detener,
                     prg,
                     ft.Divider(),
-                    log_ui,
+                    ft.Row(
+                        [
+                            ft.Icon(
+                                ft.Icons.TERMINAL,
+                                size=16,
+                                color=ft.Colors.GREY_500,
+                            ),
+                            ft.Text(
+                                "Consola de ejecución",
+                                size=12,
+                                color=ft.Colors.GREY_500,
+                                italic=True,
+                            ),
+                        ],
+                        spacing=6,
+                    ),
+                    log_container,
                 ]
             ),
         ),
