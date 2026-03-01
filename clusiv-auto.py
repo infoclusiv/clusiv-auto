@@ -1314,6 +1314,42 @@ def main(page: ft.Page):
 
         return texto.strip()
 
+    def remover_enlaces_parentesis(texto):
+        """Remueve del texto todos los enlaces web entre paréntesis.
+
+        Detecta patrones como:
+          (reuters.com)
+          (https://www.nytimes.com/article/something)
+          (bbc.com)
+          ( ft.com )
+
+        Y los elimina del texto, limpiando también espacios dobles residuales.
+        """
+        if not texto:
+            return texto
+
+        # Patrón: paréntesis conteniendo un dominio web (con o sin protocolo/path)
+        patron_enlace = (
+            r'\s*\(\s*(?:https?://)?(?:www\.)?[\w.-]+\.\w{2,}(?:/[^\)]*?)?\s*\)'
+        )
+
+        texto_limpio = re.sub(patron_enlace, '', texto)
+
+        # Limpiar espacios dobles residuales que puedan quedar
+        texto_limpio = re.sub(r'  +', ' ', texto_limpio)
+
+        # Limpiar líneas que quedaron vacías o solo con espacios
+        lineas = texto_limpio.split('\n')
+        lineas_limpias = []
+        for linea in lineas:
+            linea_stripped = linea.strip()
+            # Mantener líneas vacías intencionales (separadores de párrafo)
+            # pero eliminar líneas que solo tenían un enlace
+            if linea_stripped or linea == '':
+                lineas_limpias.append(linea.rstrip())
+
+        return '\n'.join(lineas_limpias).strip()
+
     def extraer_script_de_all_text(carpeta_proyecto):
         """Lee all_text.txt, extrae el contenido entre las etiquetas
         <<<START_TELEPROMPTER_SCRIPT>>> y <<<END_TELEPROMPTER_SCRIPT>>>,
@@ -1353,6 +1389,9 @@ def main(page: ft.Page):
             )
 
         texto_extraido = "\n\n".join(bloques_limpios)
+
+        # Limpieza adicional: remover enlaces web entre paréntesis ej: (reuters.com)
+        texto_extraido = remover_enlaces_parentesis(texto_extraido)
 
         with open(ruta_script, "w", encoding="utf-8") as f:
             f.write(texto_extraido)
