@@ -6,6 +6,8 @@ import sqlite3
 import time
 import random
 import threading
+import asyncio
+import websockets
 import pyautogui
 import pygetwindow as gw
 import webbrowser
@@ -470,6 +472,77 @@ def obtener_siguiente_num(ruta_base):
     return max(nums) + 1 if nums else 1
 
 
+# ==========================================
+# --- SERVIDOR WEBSOCKET PARA LA EXTENSIÓN ---
+# ==========================================
+active_ws_connection = None
+ws_loop = None
+available_journeys = []
+
+# Callbacks globales para interactuar con la UI de Flet desde el hilo asíncrono
+ui_update_journeys_cb = None
+ui_log_cb = None
+
+async def ws_handler(websocket):
+    global active_ws_connection, available_journeys
+    active_ws_connection = websocket
+
+    if ui_log_cb:
+        ui_log_cb("🟢 Extensión web conectada al orquestador", color=ft.Colors.GREEN_700, weight="bold")
+
+    try:
+        async for message in websocket:
+            data = json.loads(message)
+            accion = data.get("action")
+
+            if accion == "JOURNEYS_LIST":
+                available_journeys = data.get("data", [])
+                if ui_update_journeys_cb:
+                    ui_update_journeys_cb()
+
+            elif accion == "JOURNEY_STATUS":
+                status = data.get("status")
+                msg = data.get("message", "")
+                if status == "completed":
+                    if ui_log_cb: ui_log_cb(f"✅ {msg}", color=ft.Colors.GREEN_700, weight="bold")
+                elif status == "error":
+                    if ui_log_cb: ui_log_cb(f"❌ Extensión: {msg}", color=ft.Colors.RED)
+                elif status == "started":
+                    if ui_log_cb: ui_log_cb(f"🚀 {msg}", color=ft.Colors.PURPLE_700, weight="bold")
+                else:
+                    if ui_log_cb: ui_log_cb(f"▶ {msg}", color=ft.Colors.BLUE_700)
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        active_ws_connection = None
+        if ui_log_cb:
+            ui_log_cb("🔴 Extensión web desconectada. Esperando reconexión...", color=ft.Colors.ORANGE_700, weight="bold")
+
+def start_ws_server():
+    """Inicia el servidor WS en un hilo separado con su propio event loop"""
+    global ws_loop
+    
+    async def runner():
+        async with websockets.serve(ws_handler, "localhost", 8765):
+            await asyncio.Future()  # Mantiene el loop corriendo indefinidamente
+            
+    ws_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(ws_loop)
+    ws_loop.run_until_complete(runner())
+
+def send_ws_msg(msg_dict):
+    """Envía comandos a la extensión de forma segura desde otros hilos"""
+    if active_ws_connection and ws_loop:
+        asyncio.run_coroutine_threadsafe(
+            active_ws_connection.send(json.dumps(msg_dict)), ws_loop
+        )
+        return True
+    return False
+
+# Iniciar servidor WebSocket en un hilo daemon al cargar el módulo
+threading.Thread(target=start_ws_server, daemon=True).start()
+
+
 # --- 4. INTERFAZ FLET ---
 def main(page: ft.Page):
     page.title = "Clusiv Automation Hub"
@@ -586,6 +659,9 @@ def main(page: ft.Page):
             log_ui.controls = log_ui.controls[-MAX_LOG_MESSAGES:]
 
         page.update()
+
+    global ui_log_cb
+    ui_log_cb = log_msg
 
     prg = ft.ProgressBar(width=400, visible=False, color=ft.Colors.GREEN_700)
     txt_proximo = ft.Text(size=14, weight="bold", color=ft.Colors.BLUE_GREY_700)
@@ -1893,6 +1969,67 @@ def main(page: ft.Page):
         ),
     )
 
+    # ==========================================
+    # --- UI: CONTROL DE EXTENSIÓN WEB ---
+    # ==========================================
+    dropdown_journeys = ft.Dropdown(label="Seleccionar Journey guardado", expand=True)
+
+    def refrescar_journeys_ui():
+        """Se llama automáticamente cuando el navegador envía la lista"""
+        dropdown_journeys.options = [
+            ft.dropdown.Option(key=j["id"], text=j["name"])
+            for j in available_journeys
+        ]
+        if available_journeys and not dropdown_journeys.value:
+            dropdown_journeys.value = available_journeys[0]["id"]
+        page.update()
+        
+    global ui_update_journeys_cb
+    ui_update_journeys_cb = refrescar_journeys_ui
+
+    def solicitar_journeys(e):
+        if not send_ws_msg({"action": "GET_JOURNEYS"}):
+            show_snack("La extensión de Chrome no está conectada", ft.Colors.RED)
+
+    def ordenar_ejecucion_journey(e):
+        if not dropdown_journeys.value:
+            show_snack("Selecciona un Journey primero", ft.Colors.RED)
+            return
+        if not send_ws_msg({"action": "RUN_JOURNEY", "journey_id": dropdown_journeys.value}):
+             show_snack("La extensión de Chrome no está conectada", ft.Colors.RED)
+
+    tile_web_extension = ft.Card(
+        col={"md": 4},
+        content=ft.Container(
+            padding=20,
+            content=ft.Column([
+                    ft.Row([
+                            ft.Icon(ft.Icons.LANGUAGE, color=ft.Colors.BLUE_500),
+                            ft.Text("EXTENSIÓN WEB (CHROME)", weight="bold"),
+                        ]
+                    ),
+                    ft.Row([
+                        dropdown_journeys,
+                        ft.IconButton(
+                            ft.Icons.REFRESH,
+                            on_click=solicitar_journeys,
+                            tooltip="Recargar lista de Journeys",
+                            icon_color=ft.Colors.BLUE_700
+                        )
+                    ]),
+                    ft.ElevatedButton(
+                        "Ejecutar Journey en Navegador",
+                        icon=ft.Icons.PLAY_ARROW,
+                        on_click=ordenar_ejecucion_journey,
+                        width=1000,
+                        bgcolor=ft.Colors.BLUE_800,
+                        color="white",
+                    ),
+                ]
+            ),
+        ),
+    )
+
     picker = ft.FilePicker(
         on_result=lambda e: (guardar_config(ruta=e.path), page.update())
         if e.path
@@ -1901,14 +2038,13 @@ def main(page: ft.Page):
     page.overlay.append(picker)
 
     page.add(
-        ft.Row(
-            [
+        ft.Row([
                 ft.Text("Clusiv", size=32, weight="bold", color=ft.Colors.BLUE_800),
                 ft.Text("Automation", size=32),
             ],
             alignment=ft.MainAxisAlignment.CENTER,
         ),
-        ft.ResponsiveRow([tile_gestion, tile_flujo, tile_config]),
+        ft.ResponsiveRow([tile_gestion, tile_flujo, tile_config, tile_web_extension]),
         ft.ResponsiveRow([tile_prompts]),
     )
     refrescar_canales()
