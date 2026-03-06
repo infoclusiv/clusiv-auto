@@ -472,6 +472,17 @@ def obtener_siguiente_num(ruta_base):
     return max(nums) + 1 if nums else 1
 
 
+def obtener_ultimo_video(ruta_base):
+    """Busca y retorna la ruta de la carpeta del último video generado."""
+    if not ruta_base or not os.path.exists(ruta_base):
+        return None
+    carpetas = [d for d in os.listdir(ruta_base) if os.path.isdir(os.path.join(ruta_base, d))]
+    nums = [int(m.group(1)) for c in carpetas if (m := re.search(r"video\s*(\d+)", c, re.IGNORECASE))]
+    if not nums:
+        return None
+    return os.path.join(ruta_base, f"video {max(nums)}")
+
+
 # ==========================================
 # --- SERVIDOR WEBSOCKET PARA LA EXTENSIÓN ---
 # ==========================================
@@ -1973,6 +1984,13 @@ def main(page: ft.Page):
     # --- UI: CONTROL DE EXTENSIÓN WEB ---
     # ==========================================
     dropdown_journeys = ft.Dropdown(label="Seleccionar Journey guardado", expand=True)
+    
+    # Nuevo switch para decirle al bot que pegue el texto al final
+    chk_pegar_script = ft.Switch(
+        label="📝 Pegar script.txt al finalizar Journey",
+        value=True,
+        active_color=ft.Colors.BLUE_600
+    )
 
     def refrescar_journeys_ui():
         """Se llama automáticamente cuando el navegador envía la lista"""
@@ -1995,8 +2013,48 @@ def main(page: ft.Page):
         if not dropdown_journeys.value:
             show_snack("Selecciona un Journey primero", ft.Colors.RED)
             return
-        if not send_ws_msg({"action": "RUN_JOURNEY", "journey_id": dropdown_journeys.value}):
+
+        payload = {
+            "action": "RUN_JOURNEY",
+            "journey_id": dropdown_journeys.value
+        }
+
+        # Lógica para leer el archivo local y adjuntarlo al comando del navegador
+        if chk_pegar_script.value:
+            ultimo_video = obtener_ultimo_video(ruta_base[0])
+            if ultimo_video:
+                script_path = os.path.join(ultimo_video, "script.txt")
+                if os.path.exists(script_path):
+                    with open(script_path, "r", encoding="utf-8") as f:
+                        payload["paste_text_at_end"] = f.read()
+                else:
+                    show_snack(f"No se encontró script.txt en el último proyecto.", ft.Colors.RED)
+                    return # Detenemos ejecución si se requiere texto y no existe
+            else:
+                show_snack("No hay proyectos generados aún en la carpeta", ft.Colors.RED)
+                return
+
+        if not send_ws_msg(payload):
              show_snack("La extensión de Chrome no está conectada", ft.Colors.RED)
+        else:
+             show_snack("Orden de ejecución enviada", ft.Colors.GREEN)
+
+    # Botón de rescate: Permite pegar el script independientemente si no se quiere usar el "Journey"
+    def pegar_script_ahora(e):
+        ultimo_video = obtener_ultimo_video(ruta_base[0])
+        if ultimo_video:
+            script_path = os.path.join(ultimo_video, "script.txt")
+            if os.path.exists(script_path):
+                with open(script_path, "r", encoding="utf-8") as f:
+                    text = f.read()
+                    if send_ws_msg({"action": "PASTE_TEXT_NOW", "text": text}):
+                        show_snack("Texto enviado a la extensión", ft.Colors.GREEN)
+                    else:
+                        show_snack("La extensión no está conectada", ft.Colors.RED)
+            else:
+                show_snack("script.txt no encontrado", ft.Colors.RED)
+        else:
+            show_snack("No hay proyectos", ft.Colors.RED)
 
     tile_web_extension = ft.Card(
         col={"md": 4},
@@ -2017,14 +2075,24 @@ def main(page: ft.Page):
                             icon_color=ft.Colors.BLUE_700
                         )
                     ]),
-                    ft.ElevatedButton(
-                        "Ejecutar Journey en Navegador",
-                        icon=ft.Icons.PLAY_ARROW,
-                        on_click=ordenar_ejecucion_journey,
-                        width=1000,
-                        bgcolor=ft.Colors.BLUE_800,
-                        color="white",
-                    ),
+                    chk_pegar_script,
+                    ft.Row([
+                        ft.ElevatedButton(
+                            "Ejecutar Journey",
+                            icon=ft.Icons.PLAY_ARROW,
+                            on_click=ordenar_ejecucion_journey,
+                            expand=True,
+                            bgcolor=ft.Colors.BLUE_800,
+                            color="white",
+                        ),
+                        ft.IconButton(
+                            ft.Icons.PASTE,
+                            tooltip="Pegar script.txt ahora (Paso Manual)",
+                            on_click=pegar_script_ahora,
+                            icon_color=ft.Colors.BLUE_800,
+                            bgcolor=ft.Colors.BLUE_50
+                        )
+                    ])
                 ]
             ),
         ),
