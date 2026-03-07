@@ -489,10 +489,83 @@ def obtener_ultimo_video(ruta_base):
 active_ws_connection = None
 ws_loop = None
 available_journeys = []
+pending_journey_chain = {
+    "active": False,
+    "first_journey_id": None,
+    "second_journey_id": None,
+    "second_sent": False,
+}
 
 # Callbacks globales para interactuar con la UI de Flet desde el hilo asíncrono
 ui_update_journeys_cb = None
 ui_log_cb = None
+
+
+def reset_pending_journey_chain():
+    pending_journey_chain["active"] = False
+    pending_journey_chain["first_journey_id"] = None
+    pending_journey_chain["second_journey_id"] = None
+    pending_journey_chain["second_sent"] = False
+
+
+def set_pending_journey_chain(first_journey_id, second_journey_id):
+    pending_journey_chain["active"] = True
+    pending_journey_chain["first_journey_id"] = first_journey_id
+    pending_journey_chain["second_journey_id"] = second_journey_id
+    pending_journey_chain["second_sent"] = False
+
+
+def journey_chain_matches_first(journey_id):
+    first_journey_id = pending_journey_chain["first_journey_id"]
+    return not journey_id or journey_id == first_journey_id
+
+
+def is_paste_completion_signal(data):
+    status = (data.get("status") or "").lower()
+    event = (data.get("event") or "").lower()
+    phase = (data.get("phase") or "").lower()
+    msg = (data.get("message") or "").lower()
+
+    explicit_signals = {"paste_completed", "paste_done", "pasted"}
+    if status in explicit_signals or event in explicit_signals or phase in explicit_signals:
+        return True
+
+    return "paste" in msg and any(token in msg for token in ("completed", "done", "finished", "pegado"))
+
+
+def dispatch_second_journey(trigger_label):
+    if not pending_journey_chain["active"] or pending_journey_chain["second_sent"]:
+        return False
+
+    second_journey_id = pending_journey_chain["second_journey_id"]
+    if not second_journey_id:
+        reset_pending_journey_chain()
+        return False
+
+    payload = {
+        "action": "RUN_JOURNEY",
+        "journey_id": second_journey_id,
+        "triggered_by": trigger_label,
+    }
+
+    if not send_ws_msg(payload):
+        if ui_log_cb:
+            ui_log_cb(
+                "❌ No se pudo disparar la segunda automatización porque la extensión no está conectada.",
+                color=ft.Colors.RED,
+            )
+        reset_pending_journey_chain()
+        return False
+
+    pending_journey_chain["second_sent"] = True
+    if ui_log_cb:
+        ui_log_cb(
+            "🔁 Segunda automatización enviada a la extensión.",
+            color=ft.Colors.BLUE_800,
+            weight="bold",
+        )
+    reset_pending_journey_chain()
+    return True
 
 async def ws_handler(websocket):
     global active_ws_connection, available_journeys
@@ -522,10 +595,24 @@ async def ws_handler(websocket):
                     if ui_log_cb: ui_log_cb(f"🚀 {msg}", color=ft.Colors.PURPLE_700, weight="bold")
                 else:
                     if ui_log_cb: ui_log_cb(f"▶ {msg}", color=ft.Colors.BLUE_700)
+
+                if pending_journey_chain["active"] and not pending_journey_chain["second_sent"]:
+                    if status == "error" and journey_chain_matches_first(data.get("journey_id")):
+                        reset_pending_journey_chain()
+                    elif journey_chain_matches_first(data.get("journey_id")) and is_paste_completion_signal(data):
+                        dispatch_second_journey("paste_completed")
+                    elif status == "completed" and journey_chain_matches_first(data.get("journey_id")):
+                        if ui_log_cb:
+                            ui_log_cb(
+                                "⚠ El primer journey terminó, pero la extensión no envió una señal explícita de pegado completado. La segunda automatización queda cancelada hasta que la extensión emita 'paste_completed'.",
+                                color=ft.Colors.ORANGE_700,
+                            )
+                        reset_pending_journey_chain()
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
         active_ws_connection = None
+        reset_pending_journey_chain()
         if ui_log_cb:
             ui_log_cb("🔴 Extensión web desconectada. Esperando reconexión...", color=ft.Colors.ORANGE_700, weight="bold")
 
@@ -1983,7 +2070,12 @@ def main(page: ft.Page):
     # ==========================================
     # --- UI: CONTROL DE EXTENSIÓN WEB ---
     # ==========================================
-    dropdown_journeys = ft.Dropdown(label="Seleccionar Journey guardado", expand=True)
+    dropdown_journeys = ft.Dropdown(label="Journey principal", expand=True)
+    dropdown_second_journey = ft.Dropdown(
+        label="Segunda automatización",
+        expand=True,
+        disabled=True,
+    )
     
     # Nuevo switch para decirle al bot que pegue el texto al final
     chk_pegar_script = ft.Switch(
@@ -1991,15 +2083,58 @@ def main(page: ft.Page):
         value=True,
         active_color=ft.Colors.BLUE_600
     )
+    chk_segundo_journey = ft.Switch(
+        label="🔁 Ejecutar segunda automatización luego del pegado",
+        value=False,
+        active_color=ft.Colors.BLUE_600,
+    )
+
+    def actualizar_estado_segundo_journey(e=None):
+        dropdown_second_journey.disabled = not chk_segundo_journey.value
+        if not chk_segundo_journey.value:
+            dropdown_second_journey.value = None
+        page.update()
+
+    chk_segundo_journey.on_change = actualizar_estado_segundo_journey
+
+    def obtener_texto_script_ultimo_video():
+        ultimo_video = obtener_ultimo_video(ruta_base[0])
+        if not ultimo_video:
+            return None, "No hay proyectos generados aún en la carpeta"
+
+        script_path = os.path.join(ultimo_video, "script.txt")
+        if not os.path.exists(script_path):
+            return None, "No se encontró script.txt en el último proyecto."
+
+        with open(script_path, "r", encoding="utf-8") as f:
+            return f.read(), None
 
     def refrescar_journeys_ui():
         """Se llama automáticamente cuando el navegador envía la lista"""
-        dropdown_journeys.options = [
+        current_primary = dropdown_journeys.value
+        current_secondary = dropdown_second_journey.value
+        primary_options = [
             ft.dropdown.Option(key=j["id"], text=j["name"])
             for j in available_journeys
         ]
-        if available_journeys and not dropdown_journeys.value:
+        secondary_options = [
+            ft.dropdown.Option(key=j["id"], text=j["name"])
+            for j in available_journeys
+        ]
+        valid_ids = {j["id"] for j in available_journeys}
+        dropdown_journeys.options = primary_options
+        dropdown_second_journey.options = secondary_options
+
+        if current_primary in valid_ids:
+            dropdown_journeys.value = current_primary
+        elif available_journeys:
             dropdown_journeys.value = available_journeys[0]["id"]
+
+        if current_secondary in valid_ids:
+            dropdown_second_journey.value = current_secondary
+        elif current_secondary:
+            dropdown_second_journey.value = None
+
         page.update()
         
     global ui_update_journeys_cb
@@ -2014,6 +2149,17 @@ def main(page: ft.Page):
             show_snack("Selecciona un Journey primero", ft.Colors.RED)
             return
 
+        if chk_segundo_journey.value:
+            if not chk_pegar_script.value:
+                show_snack("Activa el pegado de script.txt para encadenar la segunda automatización", ft.Colors.RED)
+                return
+            if not dropdown_second_journey.value:
+                show_snack("Selecciona la segunda automatización", ft.Colors.RED)
+                return
+            if dropdown_second_journey.value == dropdown_journeys.value:
+                show_snack("El segundo journey debe ser distinto del principal", ft.Colors.RED)
+                return
+
         payload = {
             "action": "RUN_JOURNEY",
             "journey_id": dropdown_journeys.value
@@ -2021,40 +2167,42 @@ def main(page: ft.Page):
 
         # Lógica para leer el archivo local y adjuntarlo al comando del navegador
         if chk_pegar_script.value:
-            ultimo_video = obtener_ultimo_video(ruta_base[0])
-            if ultimo_video:
-                script_path = os.path.join(ultimo_video, "script.txt")
-                if os.path.exists(script_path):
-                    with open(script_path, "r", encoding="utf-8") as f:
-                        payload["paste_text_at_end"] = f.read()
-                else:
-                    show_snack(f"No se encontró script.txt en el último proyecto.", ft.Colors.RED)
-                    return # Detenemos ejecución si se requiere texto y no existe
-            else:
-                show_snack("No hay proyectos generados aún en la carpeta", ft.Colors.RED)
+            script_text, error_msg = obtener_texto_script_ultimo_video()
+            if error_msg:
+                show_snack(error_msg, ft.Colors.RED)
                 return
+            payload["paste_text_at_end"] = script_text
+
+        if chk_segundo_journey.value:
+            set_pending_journey_chain(
+                dropdown_journeys.value,
+                dropdown_second_journey.value,
+            )
+        else:
+            reset_pending_journey_chain()
 
         if not send_ws_msg(payload):
+             reset_pending_journey_chain()
              show_snack("La extensión de Chrome no está conectada", ft.Colors.RED)
         else:
              show_snack("Orden de ejecución enviada", ft.Colors.GREEN)
+             if chk_segundo_journey.value:
+                 log_msg(
+                     "⏳ Esperando señal de pegado completado para disparar la segunda automatización...",
+                     color=ft.Colors.BLUE_800,
+                 )
 
     # Botón de rescate: Permite pegar el script independientemente si no se quiere usar el "Journey"
     def pegar_script_ahora(e):
-        ultimo_video = obtener_ultimo_video(ruta_base[0])
-        if ultimo_video:
-            script_path = os.path.join(ultimo_video, "script.txt")
-            if os.path.exists(script_path):
-                with open(script_path, "r", encoding="utf-8") as f:
-                    text = f.read()
-                    if send_ws_msg({"action": "PASTE_TEXT_NOW", "text": text}):
-                        show_snack("Texto enviado a la extensión", ft.Colors.GREEN)
-                    else:
-                        show_snack("La extensión no está conectada", ft.Colors.RED)
-            else:
-                show_snack("script.txt no encontrado", ft.Colors.RED)
+        text, error_msg = obtener_texto_script_ultimo_video()
+        if error_msg:
+            show_snack(error_msg, ft.Colors.RED)
+            return
+
+        if send_ws_msg({"action": "PASTE_TEXT_NOW", "text": text}):
+            show_snack("Texto enviado a la extensión", ft.Colors.GREEN)
         else:
-            show_snack("No hay proyectos", ft.Colors.RED)
+            show_snack("La extensión no está conectada", ft.Colors.RED)
 
     tile_web_extension = ft.Card(
         col={"md": 4},
@@ -2075,6 +2223,8 @@ def main(page: ft.Page):
                             icon_color=ft.Colors.BLUE_700
                         )
                     ]),
+                    chk_segundo_journey,
+                    dropdown_second_journey,
                     chk_pegar_script,
                     ft.Row([
                         ft.ElevatedButton(
