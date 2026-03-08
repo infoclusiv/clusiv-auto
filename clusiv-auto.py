@@ -7,7 +7,10 @@ import time
 import random
 import threading
 import asyncio
+import subprocess
+import sys
 import websockets
+import wave
 import pyautogui
 import pygetwindow as gw
 import webbrowser
@@ -19,12 +22,16 @@ from dotenv import load_dotenv
 # --- 1. CONFIGURACIÓN Y RUTAS ---
 load_dotenv()
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
 # Ruta de la aplicación ChatGPT (Chrome App)
 PATH_CHATGPT = r"C:\Users\carlo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Aplicaciones de Chrome\ChatGPT.lnk"
 
 CONFIG_FILE = "config_automatizacion.json"
 DATABASE_FILE = "channels.db"
+NVIDIA_TTS_SERVER = "grpc.nvcf.nvidia.com:443"
+NVIDIA_MAGPIE_TTS_FUNCTION_ID = "877104f7-e885-42b9-8de8-f6e4c6303969"
+NVIDIA_GRPC_MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 # PROMPTS POR DEFECTO
 PROMPT_DEFAULT = """**Act as a senior YouTube Growth Strategist and expert Copywriter.**
@@ -131,13 +138,68 @@ PROMPTS_DEFAULT = [
 ]
 
 
+def obtener_tts_config_default():
+    return {
+        "enabled": False,
+        "provider": "nvidia",
+        "language_code": "en-US",
+        "voice": "Magpie-Multilingual.EN-US.Aria",
+        "output_filename": "audio.wav",
+        "sample_rate_hz": 44100,
+    }
+
+
+def normalizar_tts_config(tts_config):
+    defaults = obtener_tts_config_default()
+    normalizado = dict(defaults)
+
+    if isinstance(tts_config, dict):
+        for key, value in tts_config.items():
+            if value is not None:
+                normalizado[key] = value
+
+    normalizado["enabled"] = bool(normalizado.get("enabled", defaults["enabled"]))
+
+    provider = str(normalizado.get("provider", defaults["provider"])).strip().lower()
+    normalizado["provider"] = provider or defaults["provider"]
+
+    language_code = str(
+        normalizado.get("language_code", defaults["language_code"])
+    ).strip()
+    normalizado["language_code"] = language_code or defaults["language_code"]
+
+    voice = str(normalizado.get("voice", defaults["voice"])).strip()
+    normalizado["voice"] = voice or defaults["voice"]
+
+    output_filename = str(
+        normalizado.get("output_filename", defaults["output_filename"])
+    ).strip()
+    if not output_filename:
+        output_filename = defaults["output_filename"]
+    if not output_filename.lower().endswith(".wav"):
+        output_filename = f"{output_filename}.wav"
+    normalizado["output_filename"] = output_filename
+
+    try:
+        sample_rate_hz = int(normalizado.get("sample_rate_hz", defaults["sample_rate_hz"]))
+    except (TypeError, ValueError):
+        sample_rate_hz = defaults["sample_rate_hz"]
+    if sample_rate_hz <= 0:
+        sample_rate_hz = defaults["sample_rate_hz"]
+    normalizado["sample_rate_hz"] = sample_rate_hz
+
+    return normalizado
+
+
 # --- 2. GESTIÓN DE CONFIGURACIÓN Y BASE DE DATOS ---
-def guardar_config(ruta=None, prompts=None):
+def guardar_config(ruta=None, prompts=None, tts=None):
     config = cargar_toda_config()
     if ruta is not None:
         config["ruta_proyectos"] = ruta
     if prompts is not None:
         config["prompts"] = prompts
+    if tts is not None:
+        config["tts"] = normalizar_tts_config(tts)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
@@ -146,8 +208,10 @@ def cargar_toda_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             conf = json.load(f)
+            migrado = False
             if "ruta_proyectos" not in conf:
                 conf["ruta_proyectos"] = ""
+                migrado = True
             # Migración automática del formato legacy
             if "prompts" not in conf:
                 prompts = []
@@ -180,12 +244,9 @@ def cargar_toda_config():
                     }
                 )
                 conf["prompts"] = prompts
-                # Guardar migración
-                with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
-                    json.dump(conf, fw, indent=4, ensure_ascii=False)
+                migrado = True
             else:
                 # Migración de campos antibot para prompts existentes
-                migrado = False
                 for p in conf["prompts"]:
                     if "antibot" not in p:
                         p["antibot"] = True
@@ -193,11 +254,21 @@ def cargar_toda_config():
                     if "wpm_escritura" not in p:
                         p["wpm_escritura"] = 200
                         migrado = True
-                if migrado:
-                    with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
-                        json.dump(conf, fw, indent=4, ensure_ascii=False)
+
+            tts_normalizado = normalizar_tts_config(conf.get("tts"))
+            if conf.get("tts") != tts_normalizado:
+                conf["tts"] = tts_normalizado
+                migrado = True
+
+            if migrado:
+                with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
+                    json.dump(conf, fw, indent=4, ensure_ascii=False)
             return conf
-    return {"ruta_proyectos": "", "prompts": list(PROMPTS_DEFAULT)}
+    return {
+        "ruta_proyectos": "",
+        "prompts": list(PROMPTS_DEFAULT),
+        "tts": obtener_tts_config_default(),
+    }
 
 
 def init_db():
@@ -242,6 +313,255 @@ def eliminar_canal_db(ch_id):
     conn.execute("DELETE FROM channels WHERE channel_id = ?", (ch_id,))
     conn.commit()
     conn.close()
+
+
+def validar_texto_para_tts(texto):
+    texto_limpio = (texto or "").strip()
+    if not texto_limpio:
+        return False, "script.txt está vacío."
+    if len(texto_limpio) < 40:
+        return False, "script.txt es demasiado corto para sintetizar audio útil."
+
+    artefactos = [
+        "your full script here",
+        "do not write anything after",
+        "do not write anything before",
+        "<<<start_teleprompter_script>>>",
+        "<<<end_teleprompter_script>>>",
+    ]
+    texto_lower = texto_limpio.lower()
+    for artefacto in artefactos:
+        if artefacto in texto_lower:
+            return False, "script.txt todavía contiene artefactos del prompt."
+
+    return True, None
+
+
+def dividir_texto_para_tts(texto, max_chars=1400):
+    bloques = []
+    actual = ""
+
+    def agregar_bloque(segmento):
+        nonlocal actual
+        segmento = segmento.strip()
+        if not segmento:
+            return
+        separador = "\n\n" if actual else ""
+        if len(actual) + len(separador) + len(segmento) <= max_chars:
+            actual = f"{actual}{separador}{segmento}"
+        else:
+            if actual:
+                bloques.append(actual.strip())
+            actual = segmento
+
+    parrafos = [p.strip() for p in re.split(r"\n\s*\n", texto) if p.strip()]
+
+    for parrafo in parrafos:
+        if len(parrafo) <= max_chars:
+            agregar_bloque(parrafo)
+            continue
+
+        frases = re.split(r"(?<=[.!?])\s+", parrafo)
+        frase_actual = ""
+        for frase in frases:
+            frase = frase.strip()
+            if not frase:
+                continue
+            separador = " " if frase_actual else ""
+            if len(frase_actual) + len(separador) + len(frase) <= max_chars:
+                frase_actual = f"{frase_actual}{separador}{frase}"
+                continue
+
+            if frase_actual:
+                agregar_bloque(frase_actual)
+                frase_actual = ""
+
+            if len(frase) <= max_chars:
+                frase_actual = frase
+                continue
+
+            palabras = frase.split()
+            segmento = ""
+            for palabra in palabras:
+                separador_palabra = " " if segmento else ""
+                if len(segmento) + len(separador_palabra) + len(palabra) <= max_chars:
+                    segmento = f"{segmento}{separador_palabra}{palabra}"
+                else:
+                    agregar_bloque(segmento)
+                    segmento = palabra
+            if segmento:
+                agregar_bloque(segmento)
+
+        if frase_actual:
+            agregar_bloque(frase_actual)
+
+    if actual:
+        bloques.append(actual.strip())
+
+    return bloques or [texto.strip()]
+
+
+def guardar_audio_pcm_como_wav(ruta_salida, audio_pcm, sample_rate_hz, silencio_ms=250):
+    silencio_frames = int(sample_rate_hz * (silencio_ms / 1000.0))
+    silencio = b"\x00\x00" * silencio_frames
+
+    with wave.open(ruta_salida, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate_hz)
+
+        total = len(audio_pcm)
+        for idx, chunk in enumerate(audio_pcm):
+            wav_file.writeframes(chunk)
+            if idx < total - 1 and silencio:
+                wav_file.writeframes(silencio)
+
+
+def resolver_python_para_tts():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidatos = [
+        os.path.join(base_dir, ".venv", "Scripts", "python.exe"),
+        os.path.join(base_dir, ".venv", "bin", "python"),
+        sys.executable,
+    ]
+
+    for candidato in candidatos:
+        if candidato and os.path.exists(candidato):
+            return candidato
+
+    return sys.executable
+
+
+def sintetizar_script_a_audio_nvidia_via_standalone(carpeta_proyecto, tts_config):
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    python_tts = resolver_python_para_tts()
+    script_tts = os.path.join(base_dir, "test_nvidia_tts.py")
+
+    if not os.path.exists(script_tts):
+        return False, "No se encontró test_nvidia_tts.py para el fallback TTS.", None
+
+    cmd = [
+        python_tts,
+        script_tts,
+        "--project-dir",
+        carpeta_proyecto,
+        "--voice",
+        tts_config["voice"],
+        "--language-code",
+        tts_config["language_code"],
+        "--output",
+        tts_config["output_filename"],
+        "--sample-rate-hz",
+        str(tts_config["sample_rate_hz"]),
+        "--json-output",
+    ]
+
+    try:
+        resultado = subprocess.run(
+            cmd,
+            cwd=base_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as ex:
+        return False, f"No se pudo lanzar el fallback TTS: {str(ex)}", None
+
+    salida = (resultado.stdout or "").strip()
+    error = (resultado.stderr or "").strip()
+    payload = None
+
+    if salida:
+        ultima_linea = salida.splitlines()[-1].strip()
+        try:
+            payload = json.loads(ultima_linea)
+        except json.JSONDecodeError:
+            payload = None
+
+    if payload:
+        return payload.get("ok", False), payload.get("msg", "Sin mensaje"), payload.get("path")
+
+    if resultado.returncode == 0:
+        ruta_audio = os.path.join(carpeta_proyecto, tts_config["output_filename"])
+        return True, "Audio generado por fallback TTS.", ruta_audio
+
+    detalle = error or salida or "Error desconocido en fallback TTS."
+    return False, f"Fallback TTS falló: {detalle}", None
+
+
+def sintetizar_script_a_audio_nvidia(carpeta_proyecto, tts_config):
+    tts_config = normalizar_tts_config(tts_config)
+
+    if tts_config.get("provider") != "nvidia":
+        return False, "Proveedor TTS no soportado actualmente.", None
+
+    if not NVIDIA_API_KEY:
+        return False, "Falta NVIDIA_API_KEY en .env.", None
+
+    ruta_script = os.path.join(carpeta_proyecto, "script.txt")
+    if not os.path.exists(ruta_script):
+        return False, "No se encontró script.txt para sintetizar.", None
+
+    with open(ruta_script, "r", encoding="utf-8") as f:
+        texto = f.read()
+
+    valido, error_validacion = validar_texto_para_tts(texto)
+    if not valido:
+        return False, error_validacion, None
+
+    try:
+        import riva.client
+    except ImportError:
+        return sintetizar_script_a_audio_nvidia_via_standalone(
+            carpeta_proyecto,
+            tts_config,
+        )
+
+    chunks = dividir_texto_para_tts(texto)
+    if not chunks:
+        return False, "No se pudo dividir el texto para síntesis.", None
+
+    try:
+        auth = riva.client.Auth(
+            uri=NVIDIA_TTS_SERVER,
+            use_ssl=True,
+            metadata_args=[
+                ["function-id", NVIDIA_MAGPIE_TTS_FUNCTION_ID],
+                ["authorization", f"Bearer {NVIDIA_API_KEY}"],
+            ],
+            options=[
+                ("grpc.max_receive_message_length", NVIDIA_GRPC_MAX_MESSAGE_BYTES),
+                ("grpc.max_send_message_length", NVIDIA_GRPC_MAX_MESSAGE_BYTES),
+            ],
+        )
+        service = riva.client.SpeechSynthesisService(auth)
+
+        audios_pcm = []
+        for chunk in chunks:
+            response = service.synthesize(
+                text=chunk,
+                voice_name=tts_config["voice"],
+                language_code=tts_config["language_code"],
+                sample_rate_hz=tts_config["sample_rate_hz"],
+                encoding=riva.client.AudioEncoding.LINEAR_PCM,
+            )
+            if not getattr(response, "audio", None):
+                return False, "NVIDIA devolvió audio vacío.", None
+            audios_pcm.append(response.audio)
+
+        ruta_audio = os.path.join(carpeta_proyecto, tts_config["output_filename"])
+        guardar_audio_pcm_como_wav(
+            ruta_audio,
+            audios_pcm,
+            tts_config["sample_rate_hz"],
+        )
+        return (
+            True,
+            f"Audio generado correctamente en {tts_config['output_filename']} ({len(chunks)} fragmento(s)).",
+            ruta_audio,
+        )
+    except Exception as ex:
+        return False, f"Error NVIDIA TTS: {str(ex)}", None
 
 
 # --- 2.5 FUNCIONES ANTI-BOT ---
@@ -653,6 +973,7 @@ def main(page: ft.Page):
     config_actual = cargar_toda_config()
     ruta_base = [config_actual["ruta_proyectos"]]
     prompts_lista = config_actual["prompts"]
+    tts_config = normalizar_tts_config(config_actual.get("tts"))
 
     # Señal de cancelación para detener el flujo
     stop_event = threading.Event()
@@ -858,6 +1179,9 @@ def main(page: ft.Page):
     def guardar_prompts():
         """Guarda la lista de prompts en el config."""
         guardar_config(prompts=prompts_lista)
+
+    def guardar_tts():
+        guardar_config(tts=tts_config)
 
     def refrescar_prompts():
         """Reconstruye la UI del prompt manager en formato galería."""
@@ -1898,6 +2222,25 @@ def main(page: ft.Page):
                             color=ft.Colors.GREEN_700,
                             weight="bold",
                         )
+
+                        if tts_config.get("enabled"):
+                            log_msg(
+                                "🔊 Generando audio con NVIDIA Magpie TTS...",
+                                color=ft.Colors.BLUE_800,
+                                italic=True,
+                            )
+                            tts_ok, tts_msg, ruta_audio = sintetizar_script_a_audio_nvidia(
+                                path,
+                                tts_config,
+                            )
+                            if tts_ok:
+                                log_msg(
+                                    f"✅ {tts_msg}",
+                                    color=ft.Colors.GREEN_700,
+                                    weight="bold",
+                                )
+                            else:
+                                log_msg(f"⚠ {tts_msg}", color=ft.Colors.ORANGE_700)
                     else:
                         log_msg(f"⚠ {mensaje}", color=ft.Colors.ORANGE_700)
 
@@ -1997,6 +2340,102 @@ def main(page: ft.Page):
         ),
     )
 
+    txt_nvidia_status = ft.Text(
+        "NVIDIA API: detectada" if NVIDIA_API_KEY else "NVIDIA API: no configurada",
+        size=12,
+        color=ft.Colors.GREEN_700 if NVIDIA_API_KEY else ft.Colors.ORANGE_700,
+        italic=True,
+    )
+
+    switch_tts_enabled = ft.Switch(
+        label="🔊 Generar audio automáticamente al crear script.txt",
+        value=tts_config.get("enabled", False),
+        active_color=ft.Colors.BLUE_600,
+    )
+    txt_tts_language = ft.TextField(
+        label="Language Code",
+        value=tts_config.get("language_code", "en-US"),
+        dense=True,
+    )
+    txt_tts_voice = ft.TextField(
+        label="Voice",
+        value=tts_config.get("voice", ""),
+        dense=True,
+    )
+    txt_tts_output = ft.TextField(
+        label="Archivo WAV",
+        value=tts_config.get("output_filename", "audio.wav"),
+        dense=True,
+    )
+    txt_tts_sample_rate = ft.TextField(
+        label="Sample Rate (Hz)",
+        value=str(tts_config.get("sample_rate_hz", 44100)),
+        dense=True,
+        width=180,
+        keyboard_type=ft.KeyboardType.NUMBER,
+    )
+
+    def persistir_tts_desde_ui(mostrar_snack=False):
+        tts_config["enabled"] = bool(switch_tts_enabled.value)
+        tts_config["language_code"] = txt_tts_language.value
+        tts_config["voice"] = txt_tts_voice.value
+        tts_config["output_filename"] = txt_tts_output.value
+        tts_config["sample_rate_hz"] = txt_tts_sample_rate.value
+
+        normalizado = normalizar_tts_config(tts_config)
+        tts_config.update(normalizado)
+
+        txt_tts_language.value = tts_config["language_code"]
+        txt_tts_voice.value = tts_config["voice"]
+        txt_tts_output.value = tts_config["output_filename"]
+        txt_tts_sample_rate.value = str(tts_config["sample_rate_hz"])
+
+        guardar_tts()
+        if mostrar_snack:
+            show_snack("Configuración TTS guardada", ft.Colors.GREEN)
+        page.update()
+
+    switch_tts_enabled.on_change = lambda e: persistir_tts_desde_ui()
+    txt_tts_language.on_blur = lambda e: persistir_tts_desde_ui()
+    txt_tts_voice.on_blur = lambda e: persistir_tts_desde_ui()
+    txt_tts_output.on_blur = lambda e: persistir_tts_desde_ui()
+    txt_tts_sample_rate.on_blur = lambda e: persistir_tts_desde_ui()
+
+    def probar_tts_ultimo_proyecto(e=None):
+        persistir_tts_desde_ui()
+
+        ultimo_video = obtener_ultimo_video(ruta_base[0])
+        if not ultimo_video:
+            show_snack("No hay proyectos generados para probar TTS", ft.Colors.RED)
+            return
+
+        def ejecutar_prueba_tts():
+            try:
+                log_msg(
+                    f"🔊 Probando NVIDIA TTS en {os.path.basename(ultimo_video)}...",
+                    color=ft.Colors.BLUE_800,
+                    italic=True,
+                )
+                tts_ok, tts_msg, ruta_audio = sintetizar_script_a_audio_nvidia(
+                    ultimo_video,
+                    tts_config,
+                )
+                if tts_ok:
+                    log_msg(
+                        f"✅ {tts_msg}",
+                        color=ft.Colors.GREEN_700,
+                        weight="bold",
+                    )
+                    show_snack("TTS completado", ft.Colors.GREEN)
+                else:
+                    log_msg(f"⚠ {tts_msg}", color=ft.Colors.ORANGE_700)
+                    show_snack("TTS devolvió un warning", ft.Colors.ORANGE)
+            except Exception as ex:
+                log_msg(f"❌ Error TTS manual: {str(ex)}", color=ft.Colors.RED)
+                show_snack("Falló la prueba TTS", ft.Colors.RED)
+
+        threading.Thread(target=ejecutar_prueba_tts, daemon=True).start()
+
     tile_config = ft.Card(
         col={"md": 4},
         content=ft.Container(
@@ -2014,6 +2453,31 @@ def main(page: ft.Page):
                         "Ruta de Proyectos",
                         icon=ft.Icons.FOLDER_OPEN,
                         on_click=lambda _: picker.get_directory_path(),
+                    ),
+                    ft.Divider(),
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.RECORD_VOICE_OVER, color=ft.Colors.BLUE_600),
+                            ft.Text("NVIDIA TTS", weight="bold"),
+                        ]
+                    ),
+                    txt_nvidia_status,
+                    switch_tts_enabled,
+                    txt_tts_language,
+                    txt_tts_voice,
+                    ft.Row([txt_tts_output, txt_tts_sample_rate]),
+                    ft.ElevatedButton(
+                        "Probar TTS en último script",
+                        icon=ft.Icons.GRAPHIC_EQ,
+                        on_click=probar_tts_ultimo_proyecto,
+                        bgcolor=ft.Colors.BLUE_700,
+                        color="white",
+                    ),
+                    ft.Text(
+                        "Usa una voz válida de Magpie Multilingual, por ejemplo Magpie-Multilingual.EN-US.Aria.",
+                        size=11,
+                        color=ft.Colors.GREY_600,
+                        italic=True,
                     ),
                 ]
             ),
@@ -2248,11 +2712,15 @@ def main(page: ft.Page):
         ),
     )
 
-    picker = ft.FilePicker(
-        on_result=lambda e: (guardar_config(ruta=e.path), page.update())
-        if e.path
-        else None
-    )
+    def on_pick_directory(e):
+        if not e.path:
+            return
+        ruta_base[0] = e.path
+        guardar_config(ruta=e.path)
+        txt_proximo.value = f"Próximo Proyecto: video {obtener_siguiente_num(ruta_base[0])}"
+        page.update()
+
+    picker = ft.FilePicker(on_result=on_pick_directory)
     page.overlay.append(picker)
 
     page.add(
