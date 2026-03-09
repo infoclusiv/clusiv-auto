@@ -26,6 +26,9 @@ NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
 # Ruta de la aplicación ChatGPT (Chrome App)
 PATH_CHATGPT = r"C:\Users\carlo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Aplicaciones de Chrome\ChatGPT.lnk"
+# Ruta de acceso directo a Google AI Studio (Chrome App)
+PATH_AI_STUDIO = r"C:\Users\carlo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Aplicaciones de Chrome\Google AI Studio.lnk"
+PROMPT_AI_STUDIO_SCRIPT_PLACEHOLDER = "[PEGAR TU GUION AQUÍ]"
 
 CONFIG_FILE = "config_automatizacion.json"
 DATABASE_FILE = "channels.db"
@@ -201,7 +204,7 @@ def normalizar_tts_config(tts_config):
 
 
 # --- 2. GESTIÓN DE CONFIGURACIÓN Y BASE DE DATOS ---
-def guardar_config(ruta=None, prompts=None, tts=None, whisperx=None):
+def guardar_config(ruta=None, prompts=None, tts=None, whisperx=None, prompt_ai_studio=None):
     config = cargar_toda_config()
     if ruta is not None:
         config["ruta_proyectos"] = ruta
@@ -211,6 +214,8 @@ def guardar_config(ruta=None, prompts=None, tts=None, whisperx=None):
         config["tts"] = normalizar_tts_config(tts)
     if whisperx is not None:
         config["whisperx"] = whisperx
+    if prompt_ai_studio is not None:
+        config["prompt_ai_studio"] = prompt_ai_studio
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
@@ -276,6 +281,11 @@ def cargar_toda_config():
                 conf["whisperx"] = obtener_whisperx_config_default()
                 migrado = True
 
+            # Migración: añadir prompt_ai_studio si no existe
+            if "prompt_ai_studio" not in conf:
+                conf["prompt_ai_studio"] = ""
+                migrado = True
+
             if migrado:
                 with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
                     json.dump(conf, fw, indent=4, ensure_ascii=False)
@@ -285,6 +295,7 @@ def cargar_toda_config():
         "prompts": list(PROMPTS_DEFAULT),
         "tts": obtener_tts_config_default(),
         "whisperx": obtener_whisperx_config_default(),
+        "prompt_ai_studio": "",
     }
 
 
@@ -1044,6 +1055,66 @@ def send_ws_msg(msg_dict):
 
 # Iniciar servidor WebSocket en un hilo daemon al cargar el módulo
 threading.Thread(target=start_ws_server, daemon=True).start()
+
+
+def construir_prompt_ai_studio(prompt_base, carpeta_proyecto):
+    """Prepara el prompt final de AI Studio insertando el contenido de script.txt."""
+    if not prompt_base or not prompt_base.strip():
+        return False, "El prompt de AI Studio está vacío.", None
+
+    ruta_script = os.path.join(carpeta_proyecto, "script.txt")
+    if not os.path.exists(ruta_script):
+        return False, "No se abrió AI Studio: no se encontró script.txt en la carpeta del proyecto.", None
+
+    try:
+        with open(ruta_script, "r", encoding="utf-8") as f:
+            texto_script = f.read().strip()
+    except Exception as ex:
+        return False, f"No se pudo leer script.txt para AI Studio: {str(ex)}", None
+
+    if not texto_script:
+        return False, "No se abrió AI Studio: script.txt está vacío.", None
+
+    prompt_limpio = prompt_base.strip()
+    if PROMPT_AI_STUDIO_SCRIPT_PLACEHOLDER in prompt_limpio:
+        prompt_final = prompt_limpio.replace(
+            PROMPT_AI_STUDIO_SCRIPT_PLACEHOLDER,
+            texto_script,
+            1,
+        )
+        return (
+            True,
+            "Prompt de AI Studio preparado insertando script.txt en el placeholder.",
+            prompt_final,
+        )
+
+    prompt_final = f"{prompt_limpio.rstrip()}\n\n{texto_script}"
+    return (
+        True,
+        "Prompt de AI Studio preparado anexando script.txt al final porque no se encontró el placeholder.",
+        prompt_final,
+    )
+
+
+def abrir_ai_studio_con_prompt(texto_prompt):
+    """
+    Copia el prompt al portapapeles, abre Google AI Studio y pega automáticamente.
+    Replica la lógica de clusiv_perfil3.py -> send_img_prompt_ai_studio.
+    """
+    if not texto_prompt or not texto_prompt.strip():
+        return False, "El prompt de AI Studio está vacío."
+
+    if not os.path.exists(PATH_AI_STUDIO):
+        return False, f"No se encontró el acceso directo de AI Studio en:\n{PATH_AI_STUDIO}"
+
+    try:
+        pyperclip.copy(texto_prompt)
+        os.startfile(PATH_AI_STUDIO)
+        time.sleep(4)
+        pyautogui.hotkey("ctrl", "v")
+        return True, "AI Studio abierto y prompt pegado."
+    except Exception as ex:
+        return False, f"Error al abrir AI Studio: {str(ex)}"
 
 
 # --- 4. INTERFAZ FLET ---
@@ -2341,6 +2412,45 @@ def main(page: ft.Page):
                                             color=ft.Colors.GREEN_700,
                                             weight="bold",
                                         )
+                                        prompt_ai_base = config_actual.get("prompt_ai_studio", "").strip()
+                                        if prompt_ai_base:
+                                            prompt_ai_ok, prompt_ai_msg, prompt_ai = construir_prompt_ai_studio(
+                                                prompt_ai_base,
+                                                path,
+                                            )
+                                            if prompt_ai_ok:
+                                                log_msg(
+                                                    f"ℹ AI Studio: {prompt_ai_msg}",
+                                                    color=ft.Colors.BLUE_800,
+                                                    italic=True,
+                                                )
+                                                log_msg(
+                                                    "🤖 Abriendo Google AI Studio con el prompt configurado...",
+                                                    color=ft.Colors.BLUE_800,
+                                                    italic=True,
+                                                )
+                                                ai_ok, ai_msg = abrir_ai_studio_con_prompt(prompt_ai)
+                                                if ai_ok:
+                                                    log_msg(
+                                                        f"✅ {ai_msg}",
+                                                        color=ft.Colors.GREEN_700,
+                                                        weight="bold",
+                                                    )
+                                                else:
+                                                    log_msg(
+                                                        f"⚠ AI Studio: {ai_msg}",
+                                                        color=ft.Colors.ORANGE_700,
+                                                    )
+                                            else:
+                                                log_msg(
+                                                    f"⚠ AI Studio: {prompt_ai_msg}",
+                                                    color=ft.Colors.ORANGE_700,
+                                                )
+                                        else:
+                                            log_msg(
+                                                "⚠ No se abrió AI Studio: el prompt está vacío. Configúralo en el tile de Configuración.",
+                                                color=ft.Colors.ORANGE_700,
+                                            )
                                     else:
                                         log_msg(
                                             f"⚠ WhisperX: {wx_msg}",
@@ -2581,6 +2691,22 @@ def main(page: ft.Page):
     txt_whisperx_model.on_change = lambda e: persistir_whisperx_desde_ui()
     txt_whisperx_python.on_blur = lambda e: persistir_whisperx_desde_ui()
 
+    txt_prompt_ai_studio = ft.TextField(
+        label="Prompt para Google AI Studio (se envía al finalizar WhisperX)",
+        value=config_actual.get("prompt_ai_studio", ""),
+        multiline=True,
+        min_lines=3,
+        max_lines=6,
+        text_size=12,
+        hint_text="Escribe aquí el prompt que se pegará en AI Studio...",
+        expand=True,
+    )
+
+    def guardar_prompt_ai_studio(e):
+        config_actual["prompt_ai_studio"] = txt_prompt_ai_studio.value
+        guardar_config(prompt_ai_studio=txt_prompt_ai_studio.value)
+        show_snack("Prompt de AI Studio guardado ✅", ft.Colors.GREEN)
+
     tile_config = ft.Card(
         col={"md": 4},
         content=ft.Container(
@@ -2640,6 +2766,23 @@ def main(page: ft.Page):
                         on_click=lambda e: persistir_whisperx_desde_ui(mostrar_snack=True),
                         bgcolor=ft.Colors.PURPLE_600,
                         color="white",
+                    ),
+                    ft.Divider(),
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.SMART_TOY, color=ft.Colors.BLUE_700),
+                            ft.Text("Google AI Studio (Post-WhisperX)", weight="bold"),
+                        ]
+                    ),
+                    txt_prompt_ai_studio,
+                    ft.ElevatedButton(
+                        "Guardar Prompt AI Studio",
+                        icon=ft.Icons.SAVE,
+                        on_click=guardar_prompt_ai_studio,
+                        bgcolor=ft.Colors.BLUE_700,
+                        color="white",
+                        width=1000,
+                        height=40,
                     ),
                 ]
             ),
