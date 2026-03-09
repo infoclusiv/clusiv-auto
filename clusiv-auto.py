@@ -149,6 +149,15 @@ def obtener_tts_config_default():
     }
 
 
+def obtener_whisperx_config_default():
+    return {
+        "enabled": False,
+        "model": "medium",
+        "python_path": r"C:\Users\carlo\miniconda3\envs\whisperx-env\python.exe",
+        "runner_script": "whisperx_runner.py",
+    }
+
+
 def normalizar_tts_config(tts_config):
     defaults = obtener_tts_config_default()
     normalizado = dict(defaults)
@@ -192,7 +201,7 @@ def normalizar_tts_config(tts_config):
 
 
 # --- 2. GESTIÓN DE CONFIGURACIÓN Y BASE DE DATOS ---
-def guardar_config(ruta=None, prompts=None, tts=None):
+def guardar_config(ruta=None, prompts=None, tts=None, whisperx=None):
     config = cargar_toda_config()
     if ruta is not None:
         config["ruta_proyectos"] = ruta
@@ -200,6 +209,8 @@ def guardar_config(ruta=None, prompts=None, tts=None):
         config["prompts"] = prompts
     if tts is not None:
         config["tts"] = normalizar_tts_config(tts)
+    if whisperx is not None:
+        config["whisperx"] = whisperx
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
@@ -260,6 +271,11 @@ def cargar_toda_config():
                 conf["tts"] = tts_normalizado
                 migrado = True
 
+            # Migración: añadir sección whisperx si no existe
+            if "whisperx" not in conf:
+                conf["whisperx"] = obtener_whisperx_config_default()
+                migrado = True
+
             if migrado:
                 with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
                     json.dump(conf, fw, indent=4, ensure_ascii=False)
@@ -268,6 +284,7 @@ def cargar_toda_config():
         "ruta_proyectos": "",
         "prompts": list(PROMPTS_DEFAULT),
         "tts": obtener_tts_config_default(),
+        "whisperx": obtener_whisperx_config_default(),
     }
 
 
@@ -487,6 +504,74 @@ def sintetizar_script_a_audio_nvidia_via_standalone(carpeta_proyecto, tts_config
 
     detalle = error or salida or "Error desconocido en fallback TTS."
     return False, f"Fallback TTS falló: {detalle}", None
+
+
+def transcribir_audio_whisperx(ruta_audio, whisperx_config):
+    """
+    Lanza whisperx_runner.py como subproceso en el entorno whisperx-env
+    para transcribir el archivo de audio y generar un JSON con timestamps por palabra.
+
+    Retorna: (ok: bool, mensaje: str, ruta_json: str | None)
+    """
+    python_path = whisperx_config.get("python_path", "")
+    runner_script = whisperx_config.get("runner_script", "whisperx_runner.py")
+    model = whisperx_config.get("model", "medium")
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    runner_path = os.path.join(base_dir, runner_script)
+
+    # Validaciones previas
+    if not python_path or not os.path.exists(python_path):
+        return False, f"Python de WhisperX no encontrado en: {python_path}. Verifica la ruta en la config.", None
+
+    if not os.path.exists(runner_path):
+        return False, f"No se encontró {runner_script} en {base_dir}.", None
+
+    if not ruta_audio or not os.path.exists(ruta_audio):
+        return False, f"El archivo de audio no existe: {ruta_audio}", None
+
+    cmd = [
+        python_path,
+        runner_path,
+        "--audio-path", ruta_audio,
+        "--model", model,
+        "--json-output",
+    ]
+
+    try:
+        resultado = subprocess.run(
+            cmd,
+            cwd=base_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception as ex:
+        return False, f"No se pudo lanzar whisperx_runner: {str(ex)}", None
+
+    salida = (resultado.stdout or "").strip()
+    error_salida = (resultado.stderr or "").strip()
+    payload = None
+
+    if salida:
+        ultima_linea = salida.splitlines()[-1].strip()
+        try:
+            payload = json.loads(ultima_linea)
+        except json.JSONDecodeError:
+            payload = None
+
+    if payload:
+        return payload.get("ok", False), payload.get("msg", "Sin mensaje"), payload.get("path")
+
+    # Fallback si no hubo JSON en stdout
+    if resultado.returncode == 0:
+        ruta_json = os.path.splitext(ruta_audio)[0] + ".json"
+        return True, "Transcripción completada (sin payload JSON).", ruta_json
+
+    detalle = error_salida or salida or "Error desconocido en whisperx_runner."
+    return False, f"WhisperX falló (código {resultado.returncode}): {detalle}", None
 
 
 def sintetizar_script_a_audio_nvidia(carpeta_proyecto, tts_config):
@@ -974,6 +1059,7 @@ def main(page: ft.Page):
     ruta_base = [config_actual["ruta_proyectos"]]
     prompts_lista = config_actual["prompts"]
     tts_config = normalizar_tts_config(config_actual.get("tts"))
+    whisperx_config = config_actual.get("whisperx", obtener_whisperx_config_default())
 
     # Señal de cancelación para detener el flujo
     stop_event = threading.Event()
@@ -2239,6 +2325,28 @@ def main(page: ft.Page):
                                     color=ft.Colors.GREEN_700,
                                     weight="bold",
                                 )
+                                # --- WhisperX: transcripción automática ---
+                                if whisperx_config.get("enabled") and ruta_audio:
+                                    log_msg(
+                                        "🎙️ Iniciando transcripción con WhisperX (esto puede tardar varios minutos)...",
+                                        color=ft.Colors.BLUE_800,
+                                        italic=True,
+                                    )
+                                    wx_ok, wx_msg, ruta_json = transcribir_audio_whisperx(
+                                        ruta_audio, whisperx_config
+                                    )
+                                    if wx_ok:
+                                        log_msg(
+                                            f"✅ WhisperX: {wx_msg}",
+                                            color=ft.Colors.GREEN_700,
+                                            weight="bold",
+                                        )
+                                    else:
+                                        log_msg(
+                                            f"⚠ WhisperX: {wx_msg}",
+                                            color=ft.Colors.ORANGE_700,
+                                        )
+                                # --- FIN WhisperX ---
                             else:
                                 log_msg(f"⚠ {tts_msg}", color=ft.Colors.ORANGE_700)
                     else:
@@ -2436,6 +2544,43 @@ def main(page: ft.Page):
 
         threading.Thread(target=ejecutar_prueba_tts, daemon=True).start()
 
+    switch_whisperx_enabled = ft.Switch(
+        label="🎙️ Transcribir audio con WhisperX automáticamente",
+        value=whisperx_config.get("enabled", False),
+        active_color=ft.Colors.PURPLE_600,
+    )
+    txt_whisperx_model = ft.Dropdown(
+        label="Modelo WhisperX",
+        value=whisperx_config.get("model", "medium"),
+        options=[
+            ft.dropdown.Option("tiny"),
+            ft.dropdown.Option("base"),
+            ft.dropdown.Option("small"),
+            ft.dropdown.Option("medium"),
+            ft.dropdown.Option("large"),
+        ],
+        dense=True,
+    )
+    txt_whisperx_python = ft.TextField(
+        label="Ruta Python (whisperx-env)",
+        value=whisperx_config.get("python_path", ""),
+        dense=True,
+        hint_text=r"C:\Users\carlo\miniconda3\envs\whisperx-env\python.exe",
+    )
+
+    def persistir_whisperx_desde_ui(mostrar_snack=False):
+        whisperx_config["enabled"] = bool(switch_whisperx_enabled.value)
+        whisperx_config["model"] = txt_whisperx_model.value or "medium"
+        whisperx_config["python_path"] = txt_whisperx_python.value.strip()
+        guardar_config(whisperx=whisperx_config)
+        if mostrar_snack:
+            show_snack("Configuración WhisperX guardada", ft.Colors.GREEN)
+        page.update()
+
+    switch_whisperx_enabled.on_change = lambda e: persistir_whisperx_desde_ui()
+    txt_whisperx_model.on_change = lambda e: persistir_whisperx_desde_ui()
+    txt_whisperx_python.on_blur = lambda e: persistir_whisperx_desde_ui()
+
     tile_config = ft.Card(
         col={"md": 4},
         content=ft.Container(
@@ -2478,6 +2623,23 @@ def main(page: ft.Page):
                         size=11,
                         color=ft.Colors.GREY_600,
                         italic=True,
+                    ),
+                    ft.Divider(),
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.TRANSCRIBE, color=ft.Colors.PURPLE_500),
+                            ft.Text("WHISPERX", weight="bold"),
+                        ]
+                    ),
+                    switch_whisperx_enabled,
+                    txt_whisperx_model,
+                    txt_whisperx_python,
+                    ft.ElevatedButton(
+                        "Guardar config WhisperX",
+                        icon=ft.Icons.SAVE,
+                        on_click=lambda e: persistir_whisperx_desde_ui(mostrar_snack=True),
+                        bgcolor=ft.Colors.PURPLE_600,
+                        color="white",
                     ),
                 ]
             ),

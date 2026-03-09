@@ -141,5 +141,11 @@
         "voice": "Magpie-Multilingual.EN-US.Aria",
         "output_filename": "audio.wav",
         "sample_rate_hz": 44100
+    },
+    "whisperx": {
+        "enabled": true,
+        "model": "medium",
+        "python_path": "C:\\Users\\carlo\\miniconda3\\envs\\whisperx-env\\python.exe",
+        "runner_script": "whisperx_runner.py"
     }
 }
