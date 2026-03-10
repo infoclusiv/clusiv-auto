@@ -29,6 +29,8 @@ PATH_CHATGPT = r"C:\Users\carlo\AppData\Roaming\Microsoft\Windows\Start Menu\Pro
 # Ruta de acceso directo a Google AI Studio (Chrome App)
 PATH_AI_STUDIO = r"C:\Users\carlo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Aplicaciones de Chrome\Google AI Studio.lnk"
 PROMPT_AI_STUDIO_SCRIPT_PLACEHOLDER = "[PEGAR TU GUION AQUÍ]"
+AI_STUDIO_OUTPUT_FILENAME_DEFAULT = "prompts_imagenes.txt"
+AI_STUDIO_WINDOW_TITLES = ("Google AI Studio", "AI Studio", "Gemini")
 
 CONFIG_FILE = "config_automatizacion.json"
 DATABASE_FILE = "channels.db"
@@ -161,6 +163,14 @@ def obtener_whisperx_config_default():
     }
 
 
+def obtener_ai_studio_config_default():
+    return {
+        "prompt": "",
+        "espera_respuesta_segundos": 15,
+        "archivo_salida": AI_STUDIO_OUTPUT_FILENAME_DEFAULT,
+    }
+
+
 def normalizar_tts_config(tts_config):
     defaults = obtener_tts_config_default()
     normalizado = dict(defaults)
@@ -203,8 +213,55 @@ def normalizar_tts_config(tts_config):
     return normalizado
 
 
+def normalizar_ai_studio_config(ai_studio_config, prompt_ai_studio_legacy=None):
+    defaults = obtener_ai_studio_config_default()
+    normalizado = dict(defaults)
+
+    if isinstance(ai_studio_config, dict):
+        for key, value in ai_studio_config.items():
+            if value is not None:
+                normalizado[key] = value
+
+    prompt_legacy = str(prompt_ai_studio_legacy or "").strip()
+
+    prompt = str(normalizado.get("prompt", defaults["prompt"])).strip()
+    if not prompt and prompt_legacy:
+        prompt = prompt_legacy
+    normalizado["prompt"] = prompt
+
+    try:
+        espera = int(
+            normalizado.get(
+                "espera_respuesta_segundos",
+                defaults["espera_respuesta_segundos"],
+            )
+        )
+    except (TypeError, ValueError):
+        espera = defaults["espera_respuesta_segundos"]
+    espera = max(1, min(300, espera))
+    normalizado["espera_respuesta_segundos"] = espera
+
+    archivo_salida = str(
+        normalizado.get("archivo_salida", defaults["archivo_salida"])
+    ).strip()
+    if not archivo_salida:
+        archivo_salida = defaults["archivo_salida"]
+    if not archivo_salida.lower().endswith(".txt"):
+        archivo_salida = f"{archivo_salida}.txt"
+    normalizado["archivo_salida"] = archivo_salida
+
+    return normalizado
+
+
 # --- 2. GESTIÓN DE CONFIGURACIÓN Y BASE DE DATOS ---
-def guardar_config(ruta=None, prompts=None, tts=None, whisperx=None, prompt_ai_studio=None):
+def guardar_config(
+    ruta=None,
+    prompts=None,
+    tts=None,
+    whisperx=None,
+    prompt_ai_studio=None,
+    ai_studio=None,
+):
     config = cargar_toda_config()
     if ruta is not None:
         config["ruta_proyectos"] = ruta
@@ -214,8 +271,20 @@ def guardar_config(ruta=None, prompts=None, tts=None, whisperx=None, prompt_ai_s
         config["tts"] = normalizar_tts_config(tts)
     if whisperx is not None:
         config["whisperx"] = whisperx
+    if ai_studio is not None:
+        config["ai_studio"] = normalizar_ai_studio_config(
+            ai_studio,
+            prompt_ai_studio_legacy=config.get("prompt_ai_studio"),
+        )
+        config["prompt_ai_studio"] = config["ai_studio"]["prompt"]
     if prompt_ai_studio is not None:
-        config["prompt_ai_studio"] = prompt_ai_studio
+        config["prompt_ai_studio"] = str(prompt_ai_studio).strip()
+        ai_studio_actual = normalizar_ai_studio_config(
+            config.get("ai_studio"),
+            prompt_ai_studio_legacy=config["prompt_ai_studio"],
+        )
+        ai_studio_actual["prompt"] = config["prompt_ai_studio"]
+        config["ai_studio"] = ai_studio_actual
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
@@ -281,9 +350,16 @@ def cargar_toda_config():
                 conf["whisperx"] = obtener_whisperx_config_default()
                 migrado = True
 
-            # Migración: añadir prompt_ai_studio si no existe
-            if "prompt_ai_studio" not in conf:
-                conf["prompt_ai_studio"] = ""
+            ai_studio_normalizado = normalizar_ai_studio_config(
+                conf.get("ai_studio"),
+                prompt_ai_studio_legacy=conf.get("prompt_ai_studio"),
+            )
+            if conf.get("ai_studio") != ai_studio_normalizado:
+                conf["ai_studio"] = ai_studio_normalizado
+                migrado = True
+
+            if conf.get("prompt_ai_studio") != ai_studio_normalizado["prompt"]:
+                conf["prompt_ai_studio"] = ai_studio_normalizado["prompt"]
                 migrado = True
 
             if migrado:
@@ -295,6 +371,7 @@ def cargar_toda_config():
         "prompts": list(PROMPTS_DEFAULT),
         "tts": obtener_tts_config_default(),
         "whisperx": obtener_whisperx_config_default(),
+        "ai_studio": obtener_ai_studio_config_default(),
         "prompt_ai_studio": "",
     }
 
@@ -1112,7 +1189,9 @@ def abrir_ai_studio_con_prompt(texto_prompt):
         os.startfile(PATH_AI_STUDIO)
         time.sleep(4)
         pyautogui.hotkey("ctrl", "v")
-        return True, "AI Studio abierto y prompt pegado."
+        time.sleep(0.5)
+        pyautogui.press("enter")
+        return True, "AI Studio abierto, prompt pegado y enviado."
     except Exception as ex:
         return False, f"Error al abrir AI Studio: {str(ex)}"
 
@@ -1131,6 +1210,12 @@ def main(page: ft.Page):
     prompts_lista = config_actual["prompts"]
     tts_config = normalizar_tts_config(config_actual.get("tts"))
     whisperx_config = config_actual.get("whisperx", obtener_whisperx_config_default())
+    ai_studio_config = normalizar_ai_studio_config(
+        config_actual.get("ai_studio"),
+        config_actual.get("prompt_ai_studio"),
+    )
+    config_actual["ai_studio"] = dict(ai_studio_config)
+    config_actual["prompt_ai_studio"] = ai_studio_config["prompt"]
 
     # Señal de cancelación para detener el flujo
     stop_event = threading.Event()
@@ -2056,16 +2141,25 @@ def main(page: ft.Page):
             f"script.txt creado exitosamente ({len(bloques_limpios)} bloque(s) extraído(s), limpieza aplicada).",
         )
 
-    def extraer_respuesta_automatica(antibot=False):
+    def obtener_primera_ventana_por_titulos(titulos_objetivo):
+        titulos_normalizados = [t.lower() for t in titulos_objetivo if t]
+        for ventana in gw.getAllWindows():
+            titulo = (ventana.title or "").strip().lower()
+            if titulo and any(objetivo in titulo for objetivo in titulos_normalizados):
+                return ventana
+        return None
+
+    def copiar_texto_desde_ventana(titulos_objetivo, antibot=False):
         try:
             if stop_event.is_set():
                 return None
 
-            windows = [w for w in gw.getAllWindows() if "ChatGPT" in w.title]
-            if not windows:
+            ventana = obtener_primera_ventana_por_titulos(titulos_objetivo)
+            if not ventana:
                 return None
 
-            ventana = windows[0]
+            if hasattr(ventana, "isMinimized") and ventana.isMinimized:
+                ventana.restore()
             ventana.activate()
             if antibot:
                 if not espera_humanizada(1.5, stop_event):
@@ -2112,6 +2206,35 @@ def main(page: ft.Page):
             return pyperclip.paste()
         except:
             return None
+
+    def extraer_respuesta_automatica(antibot=False):
+        return copiar_texto_desde_ventana(("ChatGPT",), antibot=antibot)
+
+    def extraer_respuesta_ai_studio(antibot=False):
+        return copiar_texto_desde_ventana(AI_STUDIO_WINDOW_TITLES, antibot=antibot)
+
+    def extraer_prompts_ai_studio(texto_completo):
+        if not texto_completo:
+            return []
+
+        matches = re.findall(
+            r"<prompt>\s*(.*?)\s*</prompt>",
+            texto_completo,
+            re.IGNORECASE | re.DOTALL,
+        )
+        return [match.strip() for match in matches if match and match.strip()]
+
+    def guardar_prompts_ai_studio(carpeta_proyecto, prompts_extraidos, archivo_salida=None):
+        nombre_archivo = str(archivo_salida or AI_STUDIO_OUTPUT_FILENAME_DEFAULT).strip()
+        if not nombre_archivo:
+            nombre_archivo = AI_STUDIO_OUTPUT_FILENAME_DEFAULT
+        if not nombre_archivo.lower().endswith(".txt"):
+            nombre_archivo = f"{nombre_archivo}.txt"
+
+        ruta_archivo = os.path.join(carpeta_proyecto, nombre_archivo)
+        with open(ruta_archivo, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(prompts_extraidos))
+        return ruta_archivo
 
     # --- FLUJO PRINCIPAL (basado en lista de prompts) ---
     def ejecutar_flujo_completo(e):
@@ -2412,7 +2535,11 @@ def main(page: ft.Page):
                                             color=ft.Colors.GREEN_700,
                                             weight="bold",
                                         )
-                                        prompt_ai_base = config_actual.get("prompt_ai_studio", "").strip()
+                                        ai_studio_runtime = normalizar_ai_studio_config(
+                                            config_actual.get("ai_studio"),
+                                            config_actual.get("prompt_ai_studio"),
+                                        )
+                                        prompt_ai_base = ai_studio_runtime.get("prompt", "").strip()
                                         if prompt_ai_base:
                                             prompt_ai_ok, prompt_ai_msg, prompt_ai = construir_prompt_ai_studio(
                                                 prompt_ai_base,
@@ -2436,6 +2563,55 @@ def main(page: ft.Page):
                                                         color=ft.Colors.GREEN_700,
                                                         weight="bold",
                                                     )
+                                                    espera_ai = ai_studio_runtime.get(
+                                                        "espera_respuesta_segundos",
+                                                        15,
+                                                    )
+                                                    log_msg(
+                                                        f"⏳ Esperando {espera_ai}s para la respuesta de AI Studio...",
+                                                        color=ft.Colors.BLUE_800,
+                                                        italic=True,
+                                                    )
+                                                    if not sleep_cancelable(espera_ai, stop_event):
+                                                        detenido = True
+                                                    else:
+                                                        log_msg(
+                                                            "📋 Copiando respuesta completa desde AI Studio...",
+                                                            color=ft.Colors.AMBER_800,
+                                                        )
+                                                        texto_ai_studio = extraer_respuesta_ai_studio(
+                                                            antibot=False
+                                                        )
+                                                        if stop_event.is_set():
+                                                            detenido = True
+                                                        else:
+                                                            if texto_ai_studio:
+                                                                prompts_extraidos = extraer_prompts_ai_studio(
+                                                                    texto_ai_studio
+                                                                )
+                                                                if prompts_extraidos:
+                                                                    ruta_prompts = guardar_prompts_ai_studio(
+                                                                        path,
+                                                                        prompts_extraidos,
+                                                                        ai_studio_runtime.get(
+                                                                            "archivo_salida"
+                                                                        ),
+                                                                    )
+                                                                    log_msg(
+                                                                        f"✅ AI Studio: {len(prompts_extraidos)} prompt(s) guardados en {os.path.basename(ruta_prompts)}.",
+                                                                        color=ft.Colors.GREEN_700,
+                                                                        weight="bold",
+                                                                    )
+                                                                else:
+                                                                    log_msg(
+                                                                        "⚠ AI Studio: no se encontraron etiquetas <prompt></prompt> en la respuesta copiada.",
+                                                                        color=ft.Colors.ORANGE_700,
+                                                                    )
+                                                            else:
+                                                                log_msg(
+                                                                    "⚠ AI Studio: no se pudo copiar la respuesta completa desde la ventana.",
+                                                                    color=ft.Colors.ORANGE_700,
+                                                                )
                                                 else:
                                                     log_msg(
                                                         f"⚠ AI Studio: {ai_msg}",
@@ -2462,11 +2638,18 @@ def main(page: ft.Page):
                     else:
                         log_msg(f"⚠ {mensaje}", color=ft.Colors.ORANGE_700)
 
-                    log_msg(
-                        f"✅ FINALIZADO: video {num}",
-                        color=ft.Colors.GREEN_800,
-                        weight="bold",
-                    )
+                    if detenido or stop_event.is_set():
+                        log_msg(
+                            f"⛔ FLUJO DETENIDO por el usuario en video {num}",
+                            color=ft.Colors.RED_700,
+                            weight="bold",
+                        )
+                    else:
+                        log_msg(
+                            f"✅ FINALIZADO: video {num}",
+                            color=ft.Colors.GREEN_800,
+                            weight="bold",
+                        )
 
             except Exception as ex:
                 log_msg(f"❌ Error: {str(ex)}", color=ft.Colors.RED)
@@ -2693,7 +2876,7 @@ def main(page: ft.Page):
 
     txt_prompt_ai_studio = ft.TextField(
         label="Prompt para Google AI Studio (se envía al finalizar WhisperX)",
-        value=config_actual.get("prompt_ai_studio", ""),
+        value=ai_studio_config.get("prompt", ""),
         multiline=True,
         min_lines=3,
         max_lines=6,
@@ -2701,11 +2884,33 @@ def main(page: ft.Page):
         hint_text="Escribe aquí el prompt que se pegará en AI Studio...",
         expand=True,
     )
+    txt_ai_studio_wait = ft.TextField(
+        label="Espera respuesta AI Studio (segundos)",
+        value=str(ai_studio_config.get("espera_respuesta_segundos", 15)),
+        dense=True,
+        width=220,
+        keyboard_type=ft.KeyboardType.NUMBER,
+    )
 
-    def guardar_prompt_ai_studio(e):
-        config_actual["prompt_ai_studio"] = txt_prompt_ai_studio.value
-        guardar_config(prompt_ai_studio=txt_prompt_ai_studio.value)
-        show_snack("Prompt de AI Studio guardado ✅", ft.Colors.GREEN)
+    def persistir_ai_studio_desde_ui(mostrar_snack=False):
+        ai_studio_config["prompt"] = txt_prompt_ai_studio.value
+        ai_studio_config["espera_respuesta_segundos"] = txt_ai_studio_wait.value
+
+        normalizado = normalizar_ai_studio_config(ai_studio_config)
+        ai_studio_config.update(normalizado)
+
+        txt_prompt_ai_studio.value = ai_studio_config["prompt"]
+        txt_ai_studio_wait.value = str(ai_studio_config["espera_respuesta_segundos"])
+        config_actual["ai_studio"] = dict(ai_studio_config)
+        config_actual["prompt_ai_studio"] = ai_studio_config["prompt"]
+
+        guardar_config(ai_studio=ai_studio_config)
+        if mostrar_snack:
+            show_snack("Configuración AI Studio guardada", ft.Colors.GREEN)
+        page.update()
+
+    txt_prompt_ai_studio.on_blur = lambda e: persistir_ai_studio_desde_ui()
+    txt_ai_studio_wait.on_blur = lambda e: persistir_ai_studio_desde_ui()
 
     tile_config = ft.Card(
         col={"md": 4},
@@ -2774,11 +2979,18 @@ def main(page: ft.Page):
                             ft.Text("Google AI Studio (Post-WhisperX)", weight="bold"),
                         ]
                     ),
+                    txt_ai_studio_wait,
                     txt_prompt_ai_studio,
+                    ft.Text(
+                        "Los prompts extraídos se guardarán en prompts_imagenes.txt, separados por una línea en blanco.",
+                        size=11,
+                        color=ft.Colors.GREY_600,
+                        italic=True,
+                    ),
                     ft.ElevatedButton(
-                        "Guardar Prompt AI Studio",
+                        "Guardar configuración AI Studio",
                         icon=ft.Icons.SAVE,
-                        on_click=guardar_prompt_ai_studio,
+                        on_click=lambda e: persistir_ai_studio_desde_ui(mostrar_snack=True),
                         bgcolor=ft.Colors.BLUE_700,
                         color="white",
                         width=1000,
