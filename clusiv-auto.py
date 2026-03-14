@@ -168,6 +168,10 @@ def obtener_ai_studio_config_default():
         "prompt": "",
         "espera_respuesta_segundos": 15,
         "archivo_salida": AI_STUDIO_OUTPUT_FILENAME_DEFAULT,
+        "auto_send_to_extension": False,
+        "imagen_model": "imagen4",
+        "imagen_aspect_ratio": "landscape",
+        "imagen_count": 1,
     }
 
 
@@ -249,6 +253,27 @@ def normalizar_ai_studio_config(ai_studio_config, prompt_ai_studio_legacy=None):
     if not archivo_salida.lower().endswith(".txt"):
         archivo_salida = f"{archivo_salida}.txt"
     normalizado["archivo_salida"] = archivo_salida
+
+    normalizado["auto_send_to_extension"] = bool(
+        normalizado.get("auto_send_to_extension", defaults["auto_send_to_extension"])
+    )
+
+    imagen_model = str(normalizado.get("imagen_model", defaults["imagen_model"])).strip()
+    normalizado["imagen_model"] = imagen_model or defaults["imagen_model"]
+
+    imagen_aspect_ratio = str(
+        normalizado.get("imagen_aspect_ratio", defaults["imagen_aspect_ratio"])
+    ).strip()
+    normalizado["imagen_aspect_ratio"] = (
+        imagen_aspect_ratio or defaults["imagen_aspect_ratio"]
+    )
+
+    try:
+        imagen_count = int(normalizado.get("imagen_count", defaults["imagen_count"]))
+    except (TypeError, ValueError):
+        imagen_count = defaults["imagen_count"]
+    imagen_count = max(1, min(4, imagen_count))
+    normalizado["imagen_count"] = imagen_count
 
     return normalizado
 
@@ -1101,6 +1126,51 @@ async def ws_handler(websocket):
                                 color=ft.Colors.ORANGE_700,
                             )
                         reset_pending_journey_chain()
+
+            elif accion == "EXTENSION_CONNECTED":
+                version = data.get("version", "?")
+                if ui_log_cb:
+                    ui_log_cb(
+                        f"🔗 Flow Image Automator v{version} conectado y listo.",
+                        color=ft.Colors.TEAL_700,
+                        weight="bold",
+                    )
+
+            elif accion == "QUEUE_STATUS":
+                status = data.get("status", "")
+                msg = data.get("message", "")
+                if status == "queued":
+                    if ui_log_cb:
+                        ui_log_cb(
+                            f"🖼️ Extensión confirmó encolar: {msg}",
+                            color=ft.Colors.TEAL_700,
+                        )
+                elif status == "queue_status":
+                    if ui_log_cb:
+                        ui_log_cb(
+                            f"📊 Estado de la cola: {msg}",
+                            color=ft.Colors.BLUE_700,
+                        )
+                elif status == "processing_started":
+                    if ui_log_cb:
+                        ui_log_cb(
+                            "🚀 Extensión comenzó a procesar imágenes.",
+                            color=ft.Colors.GREEN_700,
+                            weight="bold",
+                        )
+                elif status == "processing_complete":
+                    if ui_log_cb:
+                        ui_log_cb(
+                            "✅ Extensión terminó de procesar todas las imágenes.",
+                            color=ft.Colors.GREEN_800,
+                            weight="bold",
+                        )
+                elif status == "error":
+                    if ui_log_cb:
+                        ui_log_cb(
+                            f"❌ Error en extensión: {msg}",
+                            color=ft.Colors.RED,
+                        )
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
@@ -1132,6 +1202,69 @@ def send_ws_msg(msg_dict):
 
 # Iniciar servidor WebSocket en un hilo daemon al cargar el módulo
 threading.Thread(target=start_ws_server, daemon=True).start()
+
+
+def send_image_prompts_to_extension(
+    ruta_txt,
+    modelo="imagen4",
+    aspect_ratio="landscape",
+    count=1,
+):
+    """
+    Lee un archivo .txt con prompts de imagen y los envía a la extensión Chrome
+    para encolarlos en Flow.
+
+    Retorna: (ok: bool, mensaje: str, cantidad: int)
+    """
+    if not ruta_txt or not os.path.exists(ruta_txt):
+        return False, f"No se encontró el archivo de prompts: {ruta_txt}", 0
+
+    try:
+        with open(ruta_txt, "r", encoding="utf-8") as f:
+            lineas = [
+                linea.strip()
+                for linea in f.readlines()
+                if linea.strip() and not linea.strip().startswith("#")
+            ]
+    except Exception as ex:
+        return False, f"Error al leer el archivo de prompts: {str(ex)}", 0
+
+    if not lineas:
+        return False, "El archivo de prompts está vacío o no tiene líneas válidas.", 0
+
+    try:
+        count_normalizado = max(1, min(4, int(count)))
+    except (TypeError, ValueError):
+        count_normalizado = 1
+
+    ts_base = int(time.time() * 1000)
+    created_at = int(time.time() * 1000)
+    tareas = [
+        {
+            "id": f"clusiv_{ts_base}_{indice}",
+            "type": "createimage",
+            "prompt": prompt,
+            "status": "pending",
+            "createdAt": created_at + indice,
+            "settings": {
+                "model": modelo,
+                "aspectRatio": aspect_ratio,
+                "count": str(count_normalizado),
+            },
+        }
+        for indice, prompt in enumerate(lineas)
+    ]
+
+    payload = {
+        "action": "QUEUE_IMAGE_PROMPTS",
+        "tasks": tareas,
+        "autoStart": True,
+    }
+
+    if not send_ws_msg(payload):
+        return False, "La extensión Chrome no está conectada al orquestador.", 0
+
+    return True, f"{len(tareas)} prompt(s) enviados correctamente a la extensión.", len(tareas)
 
 
 def construir_prompt_ai_studio(prompt_base, carpeta_proyecto):
@@ -2602,6 +2735,38 @@ def main(page: ft.Page):
                                                                         color=ft.Colors.GREEN_700,
                                                                         weight="bold",
                                                                     )
+                                                                    if (
+                                                                        not stop_event.is_set()
+                                                                        and ai_studio_runtime.get(
+                                                                            "auto_send_to_extension",
+                                                                            False,
+                                                                        )
+                                                                    ):
+                                                                        log_msg(
+                                                                            "🖼️ Enviando prompts de imagen a la extensión Chrome...",
+                                                                            color=ft.Colors.TEAL_700,
+                                                                            italic=True,
+                                                                        )
+                                                                        img_ok, img_msg, _ = send_image_prompts_to_extension(
+                                                                            ruta_prompts,
+                                                                            modelo=ai_studio_runtime.get(
+                                                                                "imagen_model",
+                                                                                "imagen4",
+                                                                            ),
+                                                                            aspect_ratio=ai_studio_runtime.get(
+                                                                                "imagen_aspect_ratio",
+                                                                                "landscape",
+                                                                            ),
+                                                                            count=ai_studio_runtime.get(
+                                                                                "imagen_count",
+                                                                                1,
+                                                                            ),
+                                                                        )
+                                                                        log_msg(
+                                                                            f"{'✅' if img_ok else '⚠'} {img_msg}",
+                                                                            color=ft.Colors.GREEN_700 if img_ok else ft.Colors.ORANGE_700,
+                                                                            weight="bold" if img_ok else None,
+                                                                        )
                                                                 else:
                                                                     log_msg(
                                                                         "⚠ AI Studio: no se encontraron etiquetas <prompt></prompt> en la respuesta copiada.",
@@ -2912,6 +3077,11 @@ def main(page: ft.Page):
     txt_prompt_ai_studio.on_blur = lambda e: persistir_ai_studio_desde_ui()
     txt_ai_studio_wait.on_blur = lambda e: persistir_ai_studio_desde_ui()
 
+    imagen_model_inicial = ai_studio_config.get("imagen_model", "imagen4")
+    imagen_aspect_inicial = ai_studio_config.get("imagen_aspect_ratio", "landscape")
+    imagen_count_inicial = str(ai_studio_config.get("imagen_count", 1))
+    auto_send_inicial = ai_studio_config.get("auto_send_to_extension", False)
+
     tile_config = ft.Card(
         col={"md": 4},
         content=ft.Container(
@@ -3043,6 +3213,169 @@ def main(page: ft.Page):
                     ),
                     ft.Divider(),
                     prompts_gallery_scroll,
+                ]
+            ),
+        ),
+    )
+
+    # ==========================================
+    # --- UI: GENERACIÓN DE IMÁGENES (FLOW AUTOMATOR) ---
+    # ==========================================
+    switch_auto_send = ft.Switch(
+        label="🔄 Enviar automáticamente al finalizar AI Studio",
+        value=auto_send_inicial,
+        active_color=ft.Colors.TEAL_600,
+    )
+
+    dropdown_imagen_model = ft.Dropdown(
+        label="Modelo de imagen",
+        value=imagen_model_inicial,
+        options=[
+            ft.dropdown.Option("imagen4", "Imagen 4"),
+            ft.dropdown.Option("nano_banana2", "NB 2"),
+            ft.dropdown.Option("nano_banana_pro", "NB Pro"),
+        ],
+        dense=True,
+        expand=True,
+    )
+
+    dropdown_imagen_aspect = ft.Dropdown(
+        label="Aspect Ratio",
+        value=imagen_aspect_inicial,
+        options=[
+            ft.dropdown.Option("landscape", "16:9 Landscape"),
+            ft.dropdown.Option("portrait", "9:16 Portrait"),
+        ],
+        dense=True,
+        expand=True,
+    )
+
+    dropdown_imagen_count = ft.Dropdown(
+        label="Imágenes por prompt",
+        value=imagen_count_inicial,
+        options=[
+            ft.dropdown.Option("1", "1x"),
+            ft.dropdown.Option("2", "2x"),
+            ft.dropdown.Option("3", "3x"),
+            ft.dropdown.Option("4", "4x"),
+        ],
+        dense=True,
+        expand=True,
+    )
+
+    lbl_imagen_status = ft.Text(
+        "Estado: esperando...",
+        size=11,
+        color=ft.Colors.GREY_500,
+        italic=True,
+    )
+
+    def persistir_imagen_config(e=None, mostrar_snack=False):
+        ai_studio_config["auto_send_to_extension"] = bool(switch_auto_send.value)
+        ai_studio_config["imagen_model"] = dropdown_imagen_model.value or "imagen4"
+        ai_studio_config["imagen_aspect_ratio"] = (
+            dropdown_imagen_aspect.value or "landscape"
+        )
+        ai_studio_config["imagen_count"] = dropdown_imagen_count.value or "1"
+
+        normalizado = normalizar_ai_studio_config(ai_studio_config)
+        ai_studio_config.update(normalizado)
+
+        switch_auto_send.value = ai_studio_config["auto_send_to_extension"]
+        dropdown_imagen_model.value = ai_studio_config["imagen_model"]
+        dropdown_imagen_aspect.value = ai_studio_config["imagen_aspect_ratio"]
+        dropdown_imagen_count.value = str(ai_studio_config["imagen_count"])
+        config_actual["ai_studio"] = dict(ai_studio_config)
+        config_actual["prompt_ai_studio"] = ai_studio_config["prompt"]
+
+        guardar_config(ai_studio=ai_studio_config)
+        if mostrar_snack:
+            show_snack("Configuración de imágenes guardada", ft.Colors.GREEN)
+        page.update()
+
+    switch_auto_send.on_change = persistir_imagen_config
+    dropdown_imagen_model.on_change = persistir_imagen_config
+    dropdown_imagen_aspect.on_change = persistir_imagen_config
+    dropdown_imagen_count.on_change = persistir_imagen_config
+
+    def enviar_prompts_manualmente(e):
+        persistir_imagen_config()
+
+        ultimo_video = obtener_ultimo_video(ruta_base[0])
+        if not ultimo_video:
+            show_snack("No hay proyectos generados todavía.", ft.Colors.RED)
+            return
+
+        ruta_txt = os.path.join(
+            ultimo_video,
+            ai_studio_config.get("archivo_salida", AI_STUDIO_OUTPUT_FILENAME_DEFAULT),
+        )
+
+        def hilo_envio():
+            lbl_imagen_status.value = "Enviando..."
+            lbl_imagen_status.color = ft.Colors.BLUE_700
+            page.update()
+            ok, msg, _ = send_image_prompts_to_extension(
+                ruta_txt,
+                modelo=ai_studio_config.get("imagen_model", "imagen4"),
+                aspect_ratio=ai_studio_config.get("imagen_aspect_ratio", "landscape"),
+                count=ai_studio_config.get("imagen_count", 1),
+            )
+            lbl_imagen_status.value = msg
+            lbl_imagen_status.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
+            log_msg(
+                f"{'✅' if ok else '❌'} Imágenes: {msg}",
+                color=ft.Colors.GREEN_700 if ok else ft.Colors.RED,
+            )
+            page.update()
+
+        threading.Thread(target=hilo_envio, daemon=True).start()
+
+    def solicitar_estado_cola(e):
+        if not send_ws_msg({"action": "GET_QUEUE_STATUS"}):
+            show_snack("La extensión no está conectada.", ft.Colors.RED)
+        else:
+            lbl_imagen_status.value = "Solicitando estado de la cola..."
+            lbl_imagen_status.color = ft.Colors.BLUE_700
+            page.update()
+
+    tile_imagen = ft.Card(
+        col={"md": 4},
+        content=ft.Container(
+            padding=20,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.IMAGE, color=ft.Colors.TEAL_600),
+                            ft.Text("GENERACIÓN DE IMÁGENES", weight="bold"),
+                        ]
+                    ),
+                    ft.Divider(),
+                    switch_auto_send,
+                    ft.Row([dropdown_imagen_model, dropdown_imagen_count]),
+                    dropdown_imagen_aspect,
+                    ft.Divider(),
+                    lbl_imagen_status,
+                    ft.Row(
+                        [
+                            ft.ElevatedButton(
+                                "Enviar Prompts",
+                                icon=ft.Icons.SEND,
+                                on_click=enviar_prompts_manualmente,
+                                expand=True,
+                                bgcolor=ft.Colors.TEAL_700,
+                                color="white",
+                            ),
+                            ft.IconButton(
+                                ft.Icons.INFO_OUTLINE,
+                                on_click=solicitar_estado_cola,
+                                tooltip="Ver estado de la cola",
+                                icon_color=ft.Colors.TEAL_700,
+                                bgcolor=ft.Colors.TEAL_50,
+                            ),
+                        ]
+                    ),
                 ]
             ),
         ),
@@ -3247,7 +3580,7 @@ def main(page: ft.Page):
             ],
             alignment=ft.MainAxisAlignment.CENTER,
         ),
-        ft.ResponsiveRow([tile_gestion, tile_flujo, tile_config, tile_web_extension]),
+        ft.ResponsiveRow([tile_gestion, tile_flujo, tile_config, tile_web_extension, tile_imagen]),
         ft.ResponsiveRow([tile_prompts]),
     )
     refrescar_canales()
