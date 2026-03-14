@@ -1209,6 +1209,8 @@ def send_image_prompts_to_extension(
     modelo="imagen4",
     aspect_ratio="landscape",
     count=1,
+    reference_image_paths=None,
+    reference_mode="ingredients",
 ):
     """
     Lee un archivo .txt con prompts de imagen y los envía a la extensión Chrome
@@ -1237,10 +1239,16 @@ def send_image_prompts_to_extension(
     except (TypeError, ValueError):
         count_normalizado = 1
 
+    ref_images_payload = encode_images_to_payload(
+        reference_image_paths,
+        reference_mode,
+    )
+
     ts_base = int(time.time() * 1000)
     created_at = int(time.time() * 1000)
-    tareas = [
-        {
+    tareas = []
+    for indice, prompt in enumerate(lineas):
+        tarea = {
             "id": f"clusiv_{ts_base}_{indice}",
             "type": "createimage",
             "prompt": prompt,
@@ -1252,8 +1260,9 @@ def send_image_prompts_to_extension(
                 "count": str(count_normalizado),
             },
         }
-        for indice, prompt in enumerate(lineas)
-    ]
+        if ref_images_payload:
+            tarea["referenceImages"] = ref_images_payload
+        tareas.append(tarea)
 
     payload = {
         "action": "QUEUE_IMAGE_PROMPTS",
@@ -1265,6 +1274,70 @@ def send_image_prompts_to_extension(
         return False, "La extensión Chrome no está conectada al orquestador.", 0
 
     return True, f"{len(tareas)} prompt(s) enviados correctamente a la extensión.", len(tareas)
+
+
+def encode_images_to_payload(image_paths, mode="ingredients"):
+    """Convierte rutas locales al payload referenceImages esperado por la extensión."""
+    import base64
+    import io
+    import mimetypes
+
+    if not image_paths:
+        return None
+
+    max_images = 5
+    max_side_px = 1024
+    images_encoded = []
+
+    for path in image_paths[:max_images]:
+        if not os.path.isfile(path):
+            continue
+
+        mime, _ = mimetypes.guess_type(path)
+        if not mime or not mime.startswith("image/"):
+            mime = "image/png"
+
+        try:
+            output_mime = mime
+            try:
+                from PIL import Image
+
+                img = Image.open(path)
+                if max(img.size) > max_side_px:
+                    img.thumbnail((max_side_px, max_side_px), Image.LANCZOS)
+
+                buffer = io.BytesIO()
+                if mime == "image/jpeg":
+                    output_mime = "image/jpeg"
+                    if img.mode not in ("RGB", "L"):
+                        img = img.convert("RGB")
+                    img.save(buffer, format="JPEG", optimize=True)
+                else:
+                    output_mime = "image/png"
+                    img.save(buffer, format="PNG", optimize=True)
+                raw = buffer.getvalue()
+            except ImportError:
+                with open(path, "rb") as f:
+                    raw = f.read()
+
+            b64 = base64.b64encode(raw).decode("utf-8")
+            data_url = f"data:{output_mime};base64,{b64}"
+            images_encoded.append(
+                {
+                    "name": os.path.basename(path),
+                    "data": data_url,
+                }
+            )
+        except Exception:
+            continue
+
+    if not images_encoded:
+        return None
+
+    return {
+        "mode": mode if mode in ("ingredients", "frames") else "ingredients",
+        "images": images_encoded,
+    }
 
 
 def construir_prompt_ai_studio(prompt_base, carpeta_proyecto):
@@ -1349,6 +1422,8 @@ def main(page: ft.Page):
     )
     config_actual["ai_studio"] = dict(ai_studio_config)
     config_actual["prompt_ai_studio"] = ai_studio_config["prompt"]
+
+    ref_image_paths_state = []
 
     # Señal de cancelación para detener el flujo
     stop_event = threading.Event()
@@ -2761,6 +2836,8 @@ def main(page: ft.Page):
                                                                                 "imagen_count",
                                                                                 1,
                                                                             ),
+                                                                            reference_image_paths=list(ref_image_paths_state) if ref_image_paths_state else None,
+                                                                            reference_mode=dropdown_ref_mode.value or "ingredients",
                                                                         )
                                                                         log_msg(
                                                                             f"{'✅' if img_ok else '⚠'} {img_msg}",
@@ -3320,6 +3397,8 @@ def main(page: ft.Page):
                 modelo=ai_studio_config.get("imagen_model", "imagen4"),
                 aspect_ratio=ai_studio_config.get("imagen_aspect_ratio", "landscape"),
                 count=ai_studio_config.get("imagen_count", 1),
+                reference_image_paths=list(ref_image_paths_state) if ref_image_paths_state else None,
+                reference_mode=dropdown_ref_mode.value or "ingredients",
             )
             lbl_imagen_status.value = msg
             lbl_imagen_status.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
@@ -3339,6 +3418,51 @@ def main(page: ft.Page):
             lbl_imagen_status.color = ft.Colors.BLUE_700
             page.update()
 
+    dropdown_ref_mode = ft.Dropdown(
+        label="Modo de referencia",
+        value="ingredients",
+        options=[
+            ft.dropdown.Option("ingredients", "Ingredients (mezcla libre)"),
+            ft.dropdown.Option("frames", "Frames (secuencia ordenada)"),
+        ],
+        dense=True,
+        expand=True,
+    )
+
+    lbl_ref_images = ft.Text(
+        "Sin imágenes de referencia",
+        size=11,
+        color=ft.Colors.GREY_500,
+        italic=True,
+    )
+
+    def _actualizar_label_ref_images():
+        count = len(ref_image_paths_state)
+        if count == 0:
+            lbl_ref_images.value = "Sin imágenes de referencia"
+            lbl_ref_images.color = ft.Colors.GREY_500
+            return
+
+        nombres = ", ".join(os.path.basename(path) for path in ref_image_paths_state)
+        lbl_ref_images.value = f"{count} imagen(es): {nombres}"
+        lbl_ref_images.color = ft.Colors.TEAL_700
+
+    def on_ref_images_picked(e: ft.FilePickerResultEvent):
+        if not e.files:
+            return
+
+        for selected_file in e.files:
+            if selected_file.path and selected_file.path not in ref_image_paths_state:
+                ref_image_paths_state.append(selected_file.path)
+
+        _actualizar_label_ref_images()
+        page.update()
+
+    def limpiar_ref_images(e=None):
+        ref_image_paths_state.clear()
+        _actualizar_label_ref_images()
+        page.update()
+
     tile_imagen = ft.Card(
         col={"md": 4},
         content=ft.Container(
@@ -3355,6 +3479,36 @@ def main(page: ft.Page):
                     switch_auto_send,
                     ft.Row([dropdown_imagen_model, dropdown_imagen_count]),
                     dropdown_imagen_aspect,
+                    ft.Divider(),
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.IMAGE_SEARCH, color=ft.Colors.TEAL_600, size=16),
+                            ft.Text("Imágenes de referencia (opcional)", size=12, weight="bold"),
+                        ]
+                    ),
+                    dropdown_ref_mode,
+                    ft.Row(
+                        [
+                            ft.ElevatedButton(
+                                "Seleccionar imágenes",
+                                icon=ft.Icons.ADD_PHOTO_ALTERNATE,
+                                on_click=lambda _: ref_images_picker.pick_files(
+                                    allow_multiple=True,
+                                    allowed_extensions=["png", "jpg", "jpeg", "webp"],
+                                ),
+                                expand=True,
+                                bgcolor=ft.Colors.TEAL_50,
+                                color=ft.Colors.TEAL_800,
+                            ),
+                            ft.IconButton(
+                                ft.Icons.CLEAR,
+                                on_click=limpiar_ref_images,
+                                tooltip="Limpiar selección",
+                                icon_color=ft.Colors.RED_400,
+                            ),
+                        ]
+                    ),
+                    lbl_ref_images,
                     ft.Divider(),
                     lbl_imagen_status,
                     ft.Row(
@@ -3571,7 +3725,9 @@ def main(page: ft.Page):
         page.update()
 
     picker = ft.FilePicker(on_result=on_pick_directory)
+    ref_images_picker = ft.FilePicker(on_result=on_ref_images_picked)
     page.overlay.append(picker)
+    page.overlay.append(ref_images_picker)
 
     page.add(
         ft.Row([
