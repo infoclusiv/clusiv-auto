@@ -9,6 +9,7 @@ import threading
 import asyncio
 import subprocess
 import sys
+import shutil
 import websockets
 import wave
 import pyautogui
@@ -1013,10 +1014,25 @@ pending_journey_chain = {
     "second_journey_id": None,
     "second_sent": False,
 }
+BROWSER_DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
+IMAGE_DOWNLOAD_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+pending_image_download = {
+    "active": False,
+    "project_dir": None,
+    "target_dir": None,
+    "download_dir": BROWSER_DOWNLOADS_DIR,
+    "snapshot": set(),
+    "started_at": 0.0,
+    "expected_count": 0,
+    "processed_files": set(),
+    "transfer_thread": None,
+}
+pending_image_download_lock = threading.Lock()
 
 # Callbacks globales para interactuar con la UI de Flet desde el hilo asíncrono
 ui_update_journeys_cb = None
 ui_log_cb = None
+ui_image_status_cb = None
 
 
 def reset_pending_journey_chain():
@@ -1031,6 +1047,314 @@ def set_pending_journey_chain(first_journey_id, second_journey_id):
     pending_journey_chain["first_journey_id"] = first_journey_id
     pending_journey_chain["second_journey_id"] = second_journey_id
     pending_journey_chain["second_sent"] = False
+
+
+def _normalize_fs_path(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _path_is_within(path, parent):
+    try:
+        return os.path.commonpath([_normalize_fs_path(path), _normalize_fs_path(parent)]) == _normalize_fs_path(parent)
+    except ValueError:
+        return False
+
+
+def _iter_image_files(root_dir, exclude_dirs=None):
+    if not root_dir or not os.path.isdir(root_dir):
+        return
+
+    excludes = [_normalize_fs_path(path) for path in (exclude_dirs or []) if path]
+
+    for current_root, dirs, files in os.walk(root_dir, topdown=True):
+        current_root_norm = _normalize_fs_path(current_root)
+        if any(_path_is_within(current_root_norm, excluded) for excluded in excludes):
+            dirs[:] = []
+            continue
+
+        dirs[:] = [
+            directory
+            for directory in dirs
+            if not any(
+                _path_is_within(os.path.join(current_root, directory), excluded)
+                for excluded in excludes
+            )
+        ]
+
+        for filename in files:
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in IMAGE_DOWNLOAD_EXTENSIONS:
+                continue
+            full_path = os.path.join(current_root, filename)
+            if full_path.lower().endswith(".crdownload"):
+                continue
+            yield full_path
+
+
+def _snapshot_image_files(root_dir, exclude_dirs=None):
+    return {
+        _normalize_fs_path(path)
+        for path in _iter_image_files(root_dir, exclude_dirs=exclude_dirs) or []
+    }
+
+
+def _build_unique_destination(dest_dir, filename):
+    base_name, ext = os.path.splitext(filename)
+    candidate = os.path.join(dest_dir, filename)
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(dest_dir, f"{base_name}_{suffix}{ext}")
+        suffix += 1
+    return candidate
+
+
+def _wait_until_file_ready(file_path, timeout_seconds=20, stable_checks=2, interval_seconds=0.75):
+    deadline = time.time() + timeout_seconds
+    last_size = -1
+    stable_hits = 0
+
+    while time.time() < deadline:
+        if not os.path.exists(file_path):
+            return False
+        try:
+            size = os.path.getsize(file_path)
+        except OSError:
+            size = -1
+
+        if size > 0 and size == last_size:
+            stable_hits += 1
+            if stable_hits >= stable_checks:
+                try:
+                    with open(file_path, "ab"):
+                        return True
+                except OSError:
+                    pass
+        else:
+            stable_hits = 0
+
+        last_size = size
+        time.sleep(interval_seconds)
+
+    return False
+
+
+def _move_file_into_project_images(source_path, target_dir, retries=5, retry_wait_seconds=1.0):
+    if not _wait_until_file_ready(source_path):
+        return False, None, "El archivo no terminó de descargarse a tiempo."
+
+    last_error = None
+    for _ in range(retries):
+        destination_path = _build_unique_destination(
+            target_dir, os.path.basename(source_path)
+        )
+        try:
+            shutil.move(source_path, destination_path)
+            return True, destination_path, None
+        except Exception as ex:
+            last_error = ex
+            time.sleep(retry_wait_seconds)
+
+    return False, None, str(last_error) if last_error else "Error desconocido al mover archivo."
+
+
+def set_image_status(texto, color=ft.Colors.GREY_500):
+    if ui_image_status_cb:
+        ui_image_status_cb(texto, color)
+
+
+def reset_pending_image_download(clear_status=False):
+    with pending_image_download_lock:
+        pending_image_download["active"] = False
+        pending_image_download["project_dir"] = None
+        pending_image_download["target_dir"] = None
+        pending_image_download["download_dir"] = BROWSER_DOWNLOADS_DIR
+        pending_image_download["snapshot"] = set()
+        pending_image_download["started_at"] = 0.0
+        pending_image_download["expected_count"] = 0
+        pending_image_download["processed_files"] = set()
+        pending_image_download["transfer_thread"] = None
+
+    if clear_status:
+        set_image_status("Estado: esperando...", ft.Colors.GREY_500)
+
+
+def prepare_pending_image_download(project_dir, expected_count=0, download_dir=None):
+    project_dir = os.path.abspath(project_dir) if project_dir else None
+    source_dir = os.path.abspath(download_dir or BROWSER_DOWNLOADS_DIR)
+
+    if not project_dir:
+        return False, "No se definió la carpeta del proyecto para recibir imágenes."
+    if not os.path.isdir(source_dir):
+        return False, f"No se encontró la carpeta de descargas: {source_dir}"
+
+    target_dir = os.path.join(project_dir, "images")
+    os.makedirs(target_dir, exist_ok=True)
+
+    snapshot = _snapshot_image_files(source_dir, exclude_dirs=[project_dir])
+
+    with pending_image_download_lock:
+        pending_image_download["active"] = True
+        pending_image_download["project_dir"] = project_dir
+        pending_image_download["target_dir"] = target_dir
+        pending_image_download["download_dir"] = source_dir
+        pending_image_download["snapshot"] = snapshot
+        pending_image_download["started_at"] = time.time()
+        pending_image_download["expected_count"] = max(0, int(expected_count or 0))
+        pending_image_download["processed_files"] = set()
+        pending_image_download["transfer_thread"] = None
+
+    return True, target_dir
+
+
+def _collect_pending_download_candidates(context):
+    candidates = []
+    source_dir = context.get("download_dir")
+    project_dir = context.get("project_dir")
+    snapshot = context.get("snapshot") or set()
+    processed_files = context.get("processed_files") or set()
+    started_at = float(context.get("started_at") or 0)
+
+    for path in _iter_image_files(source_dir, exclude_dirs=[project_dir]) or []:
+        normalized = _normalize_fs_path(path)
+        if normalized in snapshot or normalized in processed_files:
+            continue
+        try:
+            modified_at = os.path.getmtime(path)
+        except OSError:
+            continue
+        if modified_at + 2 < started_at:
+            continue
+        candidates.append((modified_at, path))
+
+    candidates.sort(key=lambda item: item[0])
+    return [path for _, path in candidates]
+
+
+def _transfer_pending_downloads_worker():
+    with pending_image_download_lock:
+        if not pending_image_download["active"]:
+            pending_image_download["transfer_thread"] = None
+            return
+        context = {
+            "project_dir": pending_image_download["project_dir"],
+            "target_dir": pending_image_download["target_dir"],
+            "download_dir": pending_image_download["download_dir"],
+            "snapshot": set(pending_image_download["snapshot"]),
+            "started_at": pending_image_download["started_at"],
+            "expected_count": pending_image_download["expected_count"],
+            "processed_files": set(),
+        }
+
+    expected_count = context["expected_count"]
+    moved_paths = []
+    errors = []
+    found_any = False
+    consecutive_idle_rounds = 0
+    max_wait_seconds = 45 if expected_count else 25
+    deadline = time.time() + max_wait_seconds
+
+    set_image_status(
+        "Extensión completó. Buscando imágenes descargadas...",
+        ft.Colors.BLUE_700,
+    )
+    if ui_log_cb:
+        ui_log_cb(
+            f"🗂️ Buscando imágenes nuevas en {context['download_dir']} para moverlas a {context['target_dir']}...",
+            color=ft.Colors.BLUE_700,
+        )
+
+    while time.time() < deadline:
+        candidates = _collect_pending_download_candidates(context)
+        if not candidates:
+            consecutive_idle_rounds += 1
+            if found_any and consecutive_idle_rounds >= 3:
+                break
+            time.sleep(1.0)
+            continue
+
+        consecutive_idle_rounds = 0
+        found_any = True
+
+        for source_path in candidates:
+            normalized = _normalize_fs_path(source_path)
+            context["processed_files"].add(normalized)
+
+            set_image_status(
+                f"Moviendo imágenes al proyecto... ({len(moved_paths) + 1})",
+                ft.Colors.BLUE_700,
+            )
+            ok, destination_path, error_msg = _move_file_into_project_images(
+                source_path,
+                context["target_dir"],
+            )
+            if ok and destination_path:
+                moved_paths.append(destination_path)
+                if ui_log_cb:
+                    ui_log_cb(
+                        f"📥 Imagen movida: {os.path.basename(destination_path)}",
+                        color=ft.Colors.GREEN_700,
+                    )
+            else:
+                errors.append(
+                    f"{os.path.basename(source_path)}: {error_msg or 'No se pudo mover.'}"
+                )
+                if ui_log_cb:
+                    ui_log_cb(
+                        f"⚠ No se pudo mover {os.path.basename(source_path)}: {error_msg}",
+                        color=ft.Colors.ORANGE_700,
+                    )
+
+        if expected_count and len(moved_paths) >= expected_count:
+            break
+
+    if moved_paths:
+        set_image_status(
+            f"{len(moved_paths)} imagen(es) movidas a images.",
+            ft.Colors.GREEN_700,
+        )
+        if ui_log_cb:
+            ui_log_cb(
+                f"✅ Se movieron {len(moved_paths)} imagen(es) a {context['target_dir']}.",
+                color=ft.Colors.GREEN_800,
+                weight="bold",
+            )
+    elif errors:
+        set_image_status(
+            "La extensión terminó, pero hubo errores al mover imágenes.",
+            ft.Colors.ORANGE_700,
+        )
+    else:
+        set_image_status(
+            "La extensión terminó, pero no se detectaron imágenes nuevas.",
+            ft.Colors.ORANGE_700,
+        )
+        if ui_log_cb:
+            ui_log_cb(
+                "⚠ No se detectaron imágenes nuevas en la carpeta de descargas después del procesamiento.",
+                color=ft.Colors.ORANGE_700,
+            )
+
+    if errors and ui_log_cb:
+        ui_log_cb(
+            f"⚠ Errores al mover imágenes: {' | '.join(errors)}",
+            color=ft.Colors.ORANGE_700,
+        )
+
+    reset_pending_image_download(clear_status=False)
+
+
+def start_pending_image_download_transfer():
+    with pending_image_download_lock:
+        if not pending_image_download["active"]:
+            return False
+        current_thread = pending_image_download.get("transfer_thread")
+        if current_thread and current_thread.is_alive():
+            return False
+        worker = threading.Thread(target=_transfer_pending_downloads_worker, daemon=True)
+        pending_image_download["transfer_thread"] = worker
+
+    worker.start()
+    return True
 
 
 def journey_chain_matches_first(journey_id):
@@ -1140,6 +1464,10 @@ async def ws_handler(websocket):
                 status = data.get("status", "")
                 msg = data.get("message", "")
                 if status == "queued":
+                    set_image_status(
+                        "Prompts encolados. Esperando inicio de procesamiento...",
+                        ft.Colors.TEAL_700,
+                    )
                     if ui_log_cb:
                         ui_log_cb(
                             f"🖼️ Extensión confirmó encolar: {msg}",
@@ -1152,6 +1480,10 @@ async def ws_handler(websocket):
                             color=ft.Colors.BLUE_700,
                         )
                 elif status == "processing_started":
+                    set_image_status(
+                        "Flow está generando y descargando imágenes...",
+                        ft.Colors.GREEN_700,
+                    )
                     if ui_log_cb:
                         ui_log_cb(
                             "🚀 Extensión comenzó a procesar imágenes.",
@@ -1159,6 +1491,12 @@ async def ws_handler(websocket):
                             weight="bold",
                         )
                 elif status == "processing_complete":
+                    transfer_started = start_pending_image_download_transfer()
+                    if not transfer_started:
+                        set_image_status(
+                            "Extensión completó el procesamiento.",
+                            ft.Colors.GREEN_700,
+                        )
                     if ui_log_cb:
                         ui_log_cb(
                             "✅ Extensión terminó de procesar todas las imágenes.",
@@ -1166,6 +1504,11 @@ async def ws_handler(websocket):
                             weight="bold",
                         )
                 elif status == "error":
+                    set_image_status(
+                        f"Error en extensión: {msg}",
+                        ft.Colors.RED_700,
+                    )
+                    reset_pending_image_download(clear_status=False)
                     if ui_log_cb:
                         ui_log_cb(
                             f"❌ Error en extensión: {msg}",
@@ -1211,6 +1554,8 @@ def send_image_prompts_to_extension(
     count=1,
     reference_image_paths=None,
     reference_mode="ingredients",
+    project_folder=None,
+    download_dir=None,
 ):
     """
     Lee un archivo .txt con prompts de imagen y los envía a la extensión Chrome
@@ -1270,7 +1615,24 @@ def send_image_prompts_to_extension(
         "autoStart": True,
     }
 
+    if project_folder:
+        prepared, destino_o_error = prepare_pending_image_download(
+            project_folder,
+            expected_count=len(tareas) * count_normalizado,
+            download_dir=download_dir,
+        )
+        if not prepared:
+            return False, destino_o_error, 0
+        if ui_log_cb:
+            ui_log_cb(
+                f"🗂️ Las imágenes nuevas se moverán a {destino_o_error}",
+                color=ft.Colors.BLUE_700,
+            )
+    else:
+        reset_pending_image_download(clear_status=False)
+
     if not send_ws_msg(payload):
+        reset_pending_image_download(clear_status=False)
         return False, "La extensión Chrome no está conectada al orquestador.", 0
 
     return True, f"{len(tareas)} prompt(s) enviados correctamente a la extensión.", len(tareas)
@@ -1531,6 +1893,19 @@ def main(page: ft.Page):
 
     global ui_log_cb
     ui_log_cb = log_msg
+
+    image_status_ref = [None]
+
+    def actualizar_estado_imagen(texto, color=ft.Colors.GREY_500):
+        status_control = image_status_ref[0]
+        if status_control is None:
+            return
+        status_control.value = texto
+        status_control.color = color
+        page.update()
+
+    global ui_image_status_cb
+    ui_image_status_cb = actualizar_estado_imagen
 
     prg = ft.ProgressBar(width=400, visible=False, color=ft.Colors.GREEN_700)
     txt_proximo = ft.Text(size=14, weight="bold", color=ft.Colors.BLUE_GREY_700)
@@ -1832,6 +2207,20 @@ def main(page: ft.Page):
         prompts_lista[idx]["habilitado"] = valor
         guardar_prompts()
         refrescar_prompts()
+
+    def deshabilitar_todos_prompts(e=None):
+        for prompt in prompts_lista:
+            prompt["habilitado"] = False
+        guardar_prompts()
+        refrescar_prompts()
+        show_snack("Todos los prompts fueron desactivados", ft.Colors.ORANGE)
+
+    def habilitar_todos_prompts(e=None):
+        for prompt in prompts_lista:
+            prompt["habilitado"] = True
+        guardar_prompts()
+        refrescar_prompts()
+        show_snack("Todos los prompts fueron activados", ft.Colors.GREEN)
 
     def mover_prompt(idx, direccion):
         nuevo_idx = idx + direccion
@@ -2838,6 +3227,7 @@ def main(page: ft.Page):
                                                                             ),
                                                                             reference_image_paths=list(ref_image_paths_state) if ref_image_paths_state else None,
                                                                             reference_mode=dropdown_ref_mode.value or "ingredients",
+                                                                            project_folder=path,
                                                                         )
                                                                         log_msg(
                                                                             f"{'✅' if img_ok else '⚠'} {img_msg}",
@@ -3277,6 +3667,16 @@ def main(page: ft.Page):
                                 "PROMPT MANAGER", weight="bold", size=16, expand=True
                             ),
                             txt_prompt_count,
+                            ft.OutlinedButton(
+                                "Desactivar todos",
+                                icon=ft.Icons.TOGGLE_OFF,
+                                on_click=deshabilitar_todos_prompts,
+                            ),
+                            ft.OutlinedButton(
+                                "Activar todos",
+                                icon=ft.Icons.TOGGLE_ON,
+                                on_click=habilitar_todos_prompts,
+                            ),
                             ft.ElevatedButton(
                                 "Agregar Prompt",
                                 icon=ft.Icons.ADD_CIRCLE_OUTLINE,
@@ -3346,6 +3746,7 @@ def main(page: ft.Page):
         color=ft.Colors.GREY_500,
         italic=True,
     )
+    image_status_ref[0] = lbl_imagen_status
 
     def persistir_imagen_config(e=None, mostrar_snack=False):
         ai_studio_config["auto_send_to_extension"] = bool(switch_auto_send.value)
@@ -3389,9 +3790,7 @@ def main(page: ft.Page):
         )
 
         def hilo_envio():
-            lbl_imagen_status.value = "Enviando..."
-            lbl_imagen_status.color = ft.Colors.BLUE_700
-            page.update()
+            actualizar_estado_imagen("Enviando...", ft.Colors.BLUE_700)
             ok, msg, _ = send_image_prompts_to_extension(
                 ruta_txt,
                 modelo=ai_studio_config.get("imagen_model", "imagen4"),
@@ -3399,14 +3798,19 @@ def main(page: ft.Page):
                 count=ai_studio_config.get("imagen_count", 1),
                 reference_image_paths=list(ref_image_paths_state) if ref_image_paths_state else None,
                 reference_mode=dropdown_ref_mode.value or "ingredients",
+                project_folder=ultimo_video,
             )
-            lbl_imagen_status.value = msg
-            lbl_imagen_status.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
+            if ok:
+                actualizar_estado_imagen(
+                    "Prompts enviados. Esperando que Flow genere y descargue imágenes...",
+                    ft.Colors.TEAL_700,
+                )
+            else:
+                actualizar_estado_imagen(msg, ft.Colors.RED_700)
             log_msg(
                 f"{'✅' if ok else '❌'} Imágenes: {msg}",
                 color=ft.Colors.GREEN_700 if ok else ft.Colors.RED,
             )
-            page.update()
 
         threading.Thread(target=hilo_envio, daemon=True).start()
 
@@ -3414,9 +3818,10 @@ def main(page: ft.Page):
         if not send_ws_msg({"action": "GET_QUEUE_STATUS"}):
             show_snack("La extensión no está conectada.", ft.Colors.RED)
         else:
-            lbl_imagen_status.value = "Solicitando estado de la cola..."
-            lbl_imagen_status.color = ft.Colors.BLUE_700
-            page.update()
+            actualizar_estado_imagen(
+                "Solicitando estado de la cola...",
+                ft.Colors.BLUE_700,
+            )
 
     dropdown_ref_mode = ft.Dropdown(
         label="Modo de referencia",
