@@ -176,6 +176,56 @@ def obtener_ai_studio_config_default():
     }
 
 
+def obtener_cortes_validos_prueba(prompts):
+    cortes = []
+    for idx, prompt in enumerate(prompts, start=1):
+        nombre = str(prompt.get("nombre", "")).strip().lower()
+        if "teleprompter" in nombre:
+            cortes.append(idx)
+
+    total = len(prompts)
+    if total and total not in cortes:
+        cortes.append(total)
+
+    return cortes
+
+
+def normalizar_ejecutar_hasta_prompt(valor, prompts):
+    total = len(prompts)
+    if total <= 0:
+        return 0
+
+    try:
+        valor_normalizado = int(valor or 0)
+    except (TypeError, ValueError):
+        valor_normalizado = 0
+
+    if valor_normalizado <= 0 or valor_normalizado >= total:
+        return 0
+
+    cortes_validos = obtener_cortes_validos_prueba(prompts)
+    if valor_normalizado in cortes_validos:
+        return valor_normalizado
+
+    cortes_menores = [corte for corte in cortes_validos if corte <= valor_normalizado]
+    if cortes_menores:
+        return max(cortes_menores)
+
+    return cortes_validos[0] if cortes_validos else 0
+
+
+def describir_alcance_prompts(prompts, ejecutar_hasta_prompt):
+    total = len(prompts)
+    if total <= 0:
+        return "Sin prompts configurados"
+
+    limite = normalizar_ejecutar_hasta_prompt(ejecutar_hasta_prompt, prompts)
+    if limite == 0:
+        return f"Flujo completo (1-{total})"
+
+    return f"Prueba rápida (1-{limite} de {total})"
+
+
 def normalizar_tts_config(tts_config):
     defaults = obtener_tts_config_default()
     normalizado = dict(defaults)
@@ -287,6 +337,7 @@ def guardar_config(
     whisperx=None,
     prompt_ai_studio=None,
     ai_studio=None,
+    ejecutar_hasta_prompt=None,
 ):
     config = cargar_toda_config()
     if ruta is not None:
@@ -311,6 +362,12 @@ def guardar_config(
         )
         ai_studio_actual["prompt"] = config["prompt_ai_studio"]
         config["ai_studio"] = ai_studio_actual
+    if ejecutar_hasta_prompt is not None:
+        config["ejecutar_hasta_prompt"] = ejecutar_hasta_prompt
+    config["ejecutar_hasta_prompt"] = normalizar_ejecutar_hasta_prompt(
+        config.get("ejecutar_hasta_prompt"),
+        config.get("prompts", []),
+    )
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
@@ -388,6 +445,14 @@ def cargar_toda_config():
                 conf["prompt_ai_studio"] = ai_studio_normalizado["prompt"]
                 migrado = True
 
+            ejecutar_hasta_prompt = normalizar_ejecutar_hasta_prompt(
+                conf.get("ejecutar_hasta_prompt"),
+                conf.get("prompts", []),
+            )
+            if conf.get("ejecutar_hasta_prompt") != ejecutar_hasta_prompt:
+                conf["ejecutar_hasta_prompt"] = ejecutar_hasta_prompt
+                migrado = True
+
             if migrado:
                 with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
                     json.dump(conf, fw, indent=4, ensure_ascii=False)
@@ -399,6 +464,7 @@ def cargar_toda_config():
         "whisperx": obtener_whisperx_config_default(),
         "ai_studio": obtener_ai_studio_config_default(),
         "prompt_ai_studio": "",
+        "ejecutar_hasta_prompt": 0,
     }
 
 
@@ -1008,6 +1074,14 @@ def obtener_ultimo_video(ruta_base):
 active_ws_connection = None
 ws_loop = None
 available_journeys = []
+extension_connected_event = threading.Event()
+extension_bridge_state = {
+    "connected": False,
+    "version": None,
+    "last_seen": 0.0,
+}
+ws_request_waiters = {}
+ws_request_waiters_lock = threading.Lock()
 pending_journey_chain = {
     "active": False,
     "first_journey_id": None,
@@ -1409,9 +1483,136 @@ def dispatch_second_journey(trigger_label):
     reset_pending_journey_chain()
     return True
 
+
+def _make_ws_request_id(prefix="py"):
+    return f"{prefix}_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+
+
+def _register_ws_waiter(request_id):
+    event = threading.Event()
+    waiter = {"event": event, "payload": None}
+    with ws_request_waiters_lock:
+        ws_request_waiters[request_id] = waiter
+    return waiter
+
+
+def _resolve_ws_waiter(data):
+    request_id = data.get("requestId") or data.get("replyTo")
+    if not request_id:
+        return False
+
+    with ws_request_waiters_lock:
+        waiter = ws_request_waiters.get(request_id)
+
+    if not waiter:
+        return False
+
+    waiter["payload"] = data
+    waiter["event"].set()
+    return True
+
+
+def _pop_ws_waiter(request_id):
+    with ws_request_waiters_lock:
+        return ws_request_waiters.pop(request_id, None)
+
+
+def wait_for_extension_connection(timeout_s=10.0):
+    if active_ws_connection and extension_connected_event.is_set():
+        return True
+    return extension_connected_event.wait(timeout_s)
+
+
+def send_ws_request_and_wait(msg_dict, expected_actions=None, timeout_s=10.0):
+    if not isinstance(msg_dict, dict):
+        return False, None, "Mensaje WS inválido."
+
+    request_id = str(msg_dict.get("requestId") or _make_ws_request_id())
+    payload = dict(msg_dict)
+    payload["requestId"] = request_id
+    waiter = _register_ws_waiter(request_id)
+
+    if not send_ws_msg(payload):
+        _pop_ws_waiter(request_id)
+        return False, None, "La extensión Chrome no está conectada al orquestador."
+
+    if not waiter["event"].wait(timeout_s):
+        _pop_ws_waiter(request_id)
+        return False, None, f"Timeout esperando respuesta de la extensión para {payload.get('action', 'request')}."
+
+    data = waiter.get("payload")
+    _pop_ws_waiter(request_id)
+
+    if expected_actions:
+        acciones = set(expected_actions)
+        if (data or {}).get("action") not in acciones:
+            return False, data, "La extensión respondió con una acción inesperada."
+
+    return True, data, ""
+
+
+def ensure_extension_ready_for_images(flow_url="https://labs.google/fx/tools/flow", timeout_s=35.0):
+    if ui_log_cb:
+        ui_log_cb(
+            "🔌 Verificando conexión con la extensión Chrome...",
+            color=ft.Colors.BLUE_700,
+        )
+    set_image_status("Verificando extensión Chrome...", ft.Colors.BLUE_700)
+
+    if not wait_for_extension_connection(timeout_s=min(timeout_s, 12.0)):
+        return False, "La extensión Chrome no se conectó al orquestador a tiempo."
+
+    ok, pong, err = send_ws_request_and_wait(
+        {"action": "PING", "source": "image-prompts"},
+        expected_actions={"PONG"},
+        timeout_s=min(timeout_s, 8.0),
+    )
+    if not ok:
+        return False, err
+
+    extension_bridge_state["last_seen"] = time.time()
+    if pong and pong.get("version"):
+        extension_bridge_state["version"] = pong.get("version")
+
+    if ui_log_cb:
+        ui_log_cb(
+            "🌐 Preparando Google Labs Flow en Chrome...",
+            color=ft.Colors.BLUE_700,
+        )
+    set_image_status("Abriendo o validando Google Labs Flow...", ft.Colors.BLUE_700)
+
+    ok, ready, err = send_ws_request_and_wait(
+        {
+            "action": "ENSURE_FLOW_READY",
+            "url": flow_url,
+            "openIfMissing": True,
+            "timeoutMs": int(timeout_s * 1000),
+        },
+        expected_actions={"FLOW_READY_STATUS"},
+        timeout_s=timeout_s,
+    )
+    if not ok:
+        return False, err
+
+    if not ready or not ready.get("ok"):
+        return False, (ready or {}).get("message") or "Flow no quedó listo para procesar prompts."
+
+    mensaje = ready.get("message") or "Google Labs Flow listo."
+    set_image_status("Google Labs Flow listo para procesar prompts.", ft.Colors.TEAL_700)
+    if ui_log_cb:
+        ui_log_cb(
+            f"✅ {mensaje}",
+            color=ft.Colors.TEAL_700,
+            weight="bold",
+        )
+    return True, mensaje
+
 async def ws_handler(websocket):
     global active_ws_connection, available_journeys
     active_ws_connection = websocket
+    extension_connected_event.set()
+    extension_bridge_state["connected"] = True
+    extension_bridge_state["last_seen"] = time.time()
 
     if ui_log_cb:
         ui_log_cb("🟢 Extensión web conectada al orquestador", color=ft.Colors.GREEN_700, weight="bold")
@@ -1420,6 +1621,13 @@ async def ws_handler(websocket):
         async for message in websocket:
             data = json.loads(message)
             accion = data.get("action")
+
+            if accion in {"PONG", "FLOW_READY_STATUS"}:
+                extension_bridge_state["last_seen"] = time.time()
+                if data.get("version"):
+                    extension_bridge_state["version"] = data.get("version")
+                _resolve_ws_waiter(data)
+                continue
 
             if accion == "JOURNEYS_LIST":
                 available_journeys = data.get("data", [])
@@ -1453,6 +1661,10 @@ async def ws_handler(websocket):
 
             elif accion == "EXTENSION_CONNECTED":
                 version = data.get("version", "?")
+                extension_bridge_state["connected"] = True
+                extension_bridge_state["version"] = version
+                extension_bridge_state["last_seen"] = time.time()
+                extension_connected_event.set()
                 if ui_log_cb:
                     ui_log_cb(
                         f"🔗 Flow Image Automator v{version} conectado y listo.",
@@ -1518,6 +1730,9 @@ async def ws_handler(websocket):
         pass
     finally:
         active_ws_connection = None
+        extension_connected_event.clear()
+        extension_bridge_state["connected"] = False
+        extension_bridge_state["last_seen"] = 0.0
         reset_pending_journey_chain()
         if ui_log_cb:
             ui_log_cb("🔴 Extensión web desconectada. Esperando reconexión...", color=ft.Colors.ORANGE_700, weight="bold")
@@ -1614,6 +1829,12 @@ def send_image_prompts_to_extension(
         "tasks": tareas,
         "autoStart": True,
     }
+
+    ready_ok, ready_msg = ensure_extension_ready_for_images()
+    if not ready_ok:
+        reset_pending_image_download(clear_status=False)
+        set_image_status(f"Error de readiness: {ready_msg}", ft.Colors.RED_700)
+        return False, ready_msg, 0
 
     if project_folder:
         prepared, destino_o_error = prepare_pending_image_download(
@@ -1776,12 +1997,19 @@ def main(page: ft.Page):
     config_actual = cargar_toda_config()
     ruta_base = [config_actual["ruta_proyectos"]]
     prompts_lista = config_actual["prompts"]
+    ejecutar_hasta_prompt = [
+        normalizar_ejecutar_hasta_prompt(
+            config_actual.get("ejecutar_hasta_prompt"),
+            prompts_lista,
+        )
+    ]
     tts_config = normalizar_tts_config(config_actual.get("tts"))
     whisperx_config = config_actual.get("whisperx", obtener_whisperx_config_default())
     ai_studio_config = normalizar_ai_studio_config(
         config_actual.get("ai_studio"),
         config_actual.get("prompt_ai_studio"),
     )
+    config_actual["ejecutar_hasta_prompt"] = ejecutar_hasta_prompt[0]
     config_actual["ai_studio"] = dict(ai_studio_config)
     config_actual["prompt_ai_studio"] = ai_studio_config["prompt"]
 
@@ -1953,6 +2181,12 @@ def main(page: ft.Page):
 
     # Prompt Manager UI container — Gallery grid
     prompts_ui = ft.ResponsiveRow(spacing=10, run_spacing=10)
+    txt_alcance_flujo = ft.Text(size=12, color=ft.Colors.BLUE_GREY_600, italic=True)
+    txt_alcance_selector = ft.Text(
+        size=11,
+        color=ft.Colors.GREY_600,
+        italic=True,
+    )
 
     def show_snack(msg, color=ft.Colors.GREEN):
         page.overlay.append(ft.SnackBar(content=ft.Text(msg), bgcolor=color))
@@ -2003,10 +2237,80 @@ def main(page: ft.Page):
 
     def guardar_prompts():
         """Guarda la lista de prompts en el config."""
-        guardar_config(prompts=prompts_lista)
+        ejecutar_hasta_prompt[0] = normalizar_ejecutar_hasta_prompt(
+            ejecutar_hasta_prompt[0],
+            prompts_lista,
+        )
+        config_actual["ejecutar_hasta_prompt"] = ejecutar_hasta_prompt[0]
+        guardar_config(
+            prompts=prompts_lista,
+            ejecutar_hasta_prompt=ejecutar_hasta_prompt[0],
+        )
+        actualizar_selector_ejecucion()
+        actualizar_resumen_alcance()
 
     def guardar_tts():
         guardar_config(tts=tts_config)
+
+    def obtener_prompts_para_ejecucion():
+        limite = normalizar_ejecutar_hasta_prompt(ejecutar_hasta_prompt[0], prompts_lista)
+        ejecutar_hasta_prompt[0] = limite
+        config_actual["ejecutar_hasta_prompt"] = limite
+        if limite == 0:
+            return list(prompts_lista), len(prompts_lista)
+        return list(prompts_lista[:limite]), limite
+
+    def actualizar_resumen_alcance():
+        descripcion = describir_alcance_prompts(prompts_lista, ejecutar_hasta_prompt[0])
+        txt_alcance_flujo.value = f"Alcance actual: {descripcion}"
+        txt_alcance_selector.value = (
+            "La prueba siempre corre desde el prompt 1 y solo permite cortes en prompts de teleprompter."
+        )
+        if btn_ejecutar_ref[0]:
+            limite = normalizar_ejecutar_hasta_prompt(ejecutar_hasta_prompt[0], prompts_lista)
+            if limite == 0:
+                btn_ejecutar_ref[0].text = "EJECUTAR FLUJO COMPLETO"
+            else:
+                btn_ejecutar_ref[0].text = f"EJECUTAR FLUJO 1-{limite}"
+
+    def actualizar_selector_ejecucion():
+        total = len(prompts_lista)
+        valor_actual = normalizar_ejecutar_hasta_prompt(
+            ejecutar_hasta_prompt[0],
+            prompts_lista,
+        )
+        ejecutar_hasta_prompt[0] = valor_actual
+        config_actual["ejecutar_hasta_prompt"] = valor_actual
+
+        opciones = [
+            ft.dropdown.Option(
+                "0",
+                f"Flujo completo (1-{total})" if total else "Flujo completo",
+            )
+        ]
+        for corte in obtener_cortes_validos_prueba(prompts_lista):
+            if corte >= total:
+                continue
+            nombre = prompts_lista[corte - 1].get("nombre", f"Prompt {corte}")
+            opciones.append(
+                ft.dropdown.Option(str(corte), f"Prueba 1-{corte} · {nombre}")
+            )
+
+        dropdown_ejecutar_hasta.options = opciones
+        dropdown_ejecutar_hasta.value = str(valor_actual)
+
+    def persistir_alcance_ejecucion(mostrar_snack=False):
+        ejecutar_hasta_prompt[0] = normalizar_ejecutar_hasta_prompt(
+            dropdown_ejecutar_hasta.value,
+            prompts_lista,
+        )
+        config_actual["ejecutar_hasta_prompt"] = ejecutar_hasta_prompt[0]
+        guardar_config(ejecutar_hasta_prompt=ejecutar_hasta_prompt[0])
+        actualizar_selector_ejecucion()
+        actualizar_resumen_alcance()
+        if mostrar_snack:
+            show_snack("Alcance de prueba guardado", ft.Colors.GREEN)
+        page.update()
 
     def refrescar_prompts():
         """Reconstruye la UI del prompt manager en formato galería."""
@@ -2810,6 +3114,98 @@ def main(page: ft.Page):
     def extraer_respuesta_ai_studio(antibot=False):
         return copiar_texto_desde_ventana(AI_STUDIO_WINDOW_TITLES, antibot=antibot)
 
+    def es_prompt_teleprompter(prompt):
+        nombre = str(prompt.get("nombre", "")).strip().lower()
+        return "teleprompter" in nombre
+
+    def construir_nombre_snapshot_teleprompter(indice_prompt, prompt):
+        nombre = str(prompt.get("nombre", f"prompt_{indice_prompt}")).strip().lower()
+        nombre = re.sub(r"[^a-z0-9]+", "_", nombre).strip("_")
+        if not nombre:
+            nombre = f"prompt_{indice_prompt}"
+        return f"teleprompter_snapshot_{indice_prompt:02d}_{nombre}.txt"
+
+    def guardar_snapshot_teleprompter(carpeta_proyecto, indice_prompt, prompt, contenido):
+        nombre_archivo = construir_nombre_snapshot_teleprompter(indice_prompt, prompt)
+        ruta_archivo = os.path.join(carpeta_proyecto, nombre_archivo)
+        with open(ruta_archivo, "w", encoding="utf-8") as f:
+            f.write(contenido)
+        return ruta_archivo
+
+    def extraer_bloques_teleprompter(texto):
+        if not texto:
+            return []
+
+        patron = r"<<<START_TELEPROMPTER_SCRIPT>>>(.*?)<<<END_TELEPROMPTER_SCRIPT>>>"
+        return [
+            bloque.strip()
+            for bloque in re.findall(patron, texto, re.DOTALL)
+            if bloque and bloque.strip()
+        ]
+
+    def reconstruir_all_text_desde_teleprompters(carpeta_proyecto, prompts_ejecutados):
+        rutas_fuente = []
+        for indice_prompt, prompt in enumerate(prompts_ejecutados, start=1):
+            if not es_prompt_teleprompter(prompt):
+                continue
+
+            archivo_salida = str(prompt.get("archivo_salida", "")).strip()
+            if archivo_salida:
+                rutas_fuente.append(os.path.join(carpeta_proyecto, archivo_salida))
+                continue
+
+            rutas_fuente.append(
+                os.path.join(
+                    carpeta_proyecto,
+                    construir_nombre_snapshot_teleprompter(indice_prompt, prompt),
+                )
+            )
+
+        if not rutas_fuente:
+            return False, "No hay prompts teleprompter disponibles para reconstruir all_text.txt."
+
+        bloques = []
+        bloques_vistos = set()
+        archivos_usados = 0
+
+        for ruta_fuente in rutas_fuente:
+            if not os.path.exists(ruta_fuente):
+                continue
+
+            with open(ruta_fuente, "r", encoding="utf-8") as f:
+                contenido = f.read()
+
+            bloques_archivo = extraer_bloques_teleprompter(contenido)
+            if not bloques_archivo:
+                continue
+
+            archivos_usados += 1
+            for bloque in bloques_archivo:
+                if bloque in bloques_vistos:
+                    continue
+                bloques_vistos.add(bloque)
+                bloques.append(bloque)
+
+        if not bloques:
+            return (
+                False,
+                "No se encontraron bloques teleprompter reutilizables para reconstruir all_text.txt.",
+            )
+
+        ruta_all_text = os.path.join(carpeta_proyecto, "all_text.txt")
+        contenido_all_text = "\n\n".join(
+            f"<<<START_TELEPROMPTER_SCRIPT>>>\n{bloque}\n<<<END_TELEPROMPTER_SCRIPT>>>"
+            for bloque in bloques
+        )
+
+        with open(ruta_all_text, "w", encoding="utf-8") as f:
+            f.write(contenido_all_text)
+
+        return (
+            True,
+            f"all_text.txt reconstruido con {len(bloques)} bloque(s) desde {archivos_usados} archivo(s) teleprompter.",
+        )
+
     def extraer_prompts_ai_studio(texto_completo):
         if not texto_completo:
             return []
@@ -2842,10 +3238,12 @@ def main(page: ft.Page):
             show_snack("Falta API KEY en .env", ft.Colors.RED)
             return
 
-        habilitados = [p for p in prompts_lista if p.get("habilitado", True)]
-        if not habilitados:
-            show_snack("No hay prompts habilitados", ft.Colors.RED)
+        prompts_a_ejecutar, _ = obtener_prompts_para_ejecucion()
+        if not prompts_a_ejecutar:
+            show_snack("No hay prompts configurados", ft.Colors.RED)
             return
+
+        alcance_actual = describir_alcance_prompts(prompts_lista, ejecutar_hasta_prompt[0])
 
         # Limpiar señal de cancelación y preparar UI
         stop_event.clear()
@@ -2854,6 +3252,7 @@ def main(page: ft.Page):
         set_estado_ejecutando(True)
         page.update()
         log_msg("🚀 Iniciando flujo completo...", italic=True)
+        log_msg(f"⚙️ Alcance configurado: {alcance_actual}", color=ft.Colors.BLUE_800)
 
         def proceso_hilo():
             detenido = False
@@ -2909,8 +3308,12 @@ def main(page: ft.Page):
                 ).close()
 
                 titulo_extraido = None
+                all_text_esperado = any(
+                    str(p.get("archivo_salida", "")).strip().lower() == "all_text.txt"
+                    for p in prompts_a_ejecutar
+                )
 
-                for idx, p in enumerate(habilitados):
+                for idx, p in enumerate(prompts_a_ejecutar):
                     if stop_event.is_set():
                         detenido = True
                         break
@@ -2938,7 +3341,7 @@ def main(page: ft.Page):
 
                     ab_tag = " 🛡️" if ab else ""
                     log_msg(
-                        f"🌐 [{idx + 1}/{len(habilitados)}] Enviando: {nombre_prompt}{ab_tag}...",
+                        f"🌐 [{idx + 1}/{len(prompts_a_ejecutar)}] Enviando: {nombre_prompt}{ab_tag}...",
                         color=ft.Colors.BLUE,
                     )
 
@@ -3052,6 +3455,43 @@ def main(page: ft.Page):
                                     color=ft.Colors.RED,
                                 )
                         else:
+                            if es_prompt_teleprompter(p):
+                                log_msg(
+                                    f"📋 Capturando snapshot teleprompter para '{nombre_prompt}'...",
+                                    color=ft.Colors.AMBER_800,
+                                )
+                                texto_teleprompter = extraer_respuesta_automatica(antibot=ab)
+
+                                if stop_event.is_set():
+                                    detenido = True
+                                    break
+
+                                if texto_teleprompter:
+                                    ruta_snapshot = guardar_snapshot_teleprompter(
+                                        path,
+                                        idx + 1,
+                                        p,
+                                        texto_teleprompter,
+                                    )
+                                    bloques_snapshot = extraer_bloques_teleprompter(
+                                        texto_teleprompter
+                                    )
+                                    if bloques_snapshot:
+                                        log_msg(
+                                            f"✅ Snapshot teleprompter guardado ({len(bloques_snapshot)} bloque(s)): {os.path.basename(ruta_snapshot)}",
+                                            color=ft.Colors.GREEN_700,
+                                            weight="bold",
+                                        )
+                                    else:
+                                        log_msg(
+                                            f"⚠ Se guardó el snapshot teleprompter, pero no se detectaron bloques válidos todavía: {os.path.basename(ruta_snapshot)}",
+                                            color=ft.Colors.ORANGE_700,
+                                        )
+                                else:
+                                    log_msg(
+                                        f"⚠ No se pudo capturar el snapshot teleprompter de '{nombre_prompt}'.",
+                                        color=ft.Colors.ORANGE_700,
+                                    )
                             log_msg(
                                 f"✅ Prompt '{nombre_prompt}' enviado.",
                                 color=ft.Colors.GREEN_700,
@@ -3066,7 +3506,7 @@ def main(page: ft.Page):
                         )
 
                     # Pausa entre prompts
-                    if idx < len(habilitados) - 1:
+                    if idx < len(prompts_a_ejecutar) - 1:
                         if ab:
                             if not espera_humanizada(3, stop_event):
                                 detenido = True
@@ -3085,190 +3525,224 @@ def main(page: ft.Page):
                         weight="bold",
                     )
                 else:
-                    log_msg(
-                        "📄 Buscando all_text.txt para extraer script...",
-                        color=ft.Colors.BLUE_800,
-                        italic=True,
-                    )
-
-                    exito, mensaje = extraer_script_de_all_text(path)
-
-                    if exito:
-                        log_msg(
-                            f"✅ {mensaje}",
-                            color=ft.Colors.GREEN_700,
-                            weight="bold",
-                        )
-
-                        if tts_config.get("enabled"):
-                            log_msg(
-                                "🔊 Generando audio con NVIDIA Magpie TTS...",
-                                color=ft.Colors.BLUE_800,
-                                italic=True,
-                            )
-                            tts_ok, tts_msg, ruta_audio = sintetizar_script_a_audio_nvidia(
+                    ruta_all_text = os.path.join(path, "all_text.txt")
+                    if not os.path.exists(ruta_all_text):
+                        reconstruccion_ok = False
+                        if not all_text_esperado:
+                            reconstruccion_ok, reconstruccion_msg = reconstruir_all_text_desde_teleprompters(
                                 path,
-                                tts_config,
+                                prompts_a_ejecutar,
                             )
-                            if tts_ok:
+                            if reconstruccion_ok:
                                 log_msg(
-                                    f"✅ {tts_msg}",
+                                    f"✅ {reconstruccion_msg}",
                                     color=ft.Colors.GREEN_700,
                                     weight="bold",
                                 )
-                                # --- WhisperX: transcripción automática ---
-                                if whisperx_config.get("enabled") and ruta_audio:
+                            else:
+                                log_msg(
+                                    f"ℹ No se pudo reconstruir all_text.txt para el alcance parcial: {reconstruccion_msg}",
+                                    color=ft.Colors.BLUE_800,
+                                    italic=True,
+                                )
+
+                        if not os.path.exists(ruta_all_text) and all_text_esperado:
+                            log_msg(
+                                "⚠ Se omitió el postproceso final porque no se generó all_text.txt en esta corrida.",
+                                color=ft.Colors.ORANGE_700,
+                            )
+                        elif not os.path.exists(ruta_all_text):
+                            log_msg(
+                                f"ℹ Se omite el postproceso final porque el alcance '{alcance_actual}' no dejó bloques teleprompter reutilizables.",
+                                color=ft.Colors.BLUE_800,
+                                italic=True,
+                            )
+
+                    if os.path.exists(ruta_all_text):
+                        log_msg(
+                            "📄 Buscando all_text.txt para extraer script...",
+                            color=ft.Colors.BLUE_800,
+                            italic=True,
+                        )
+
+                        exito, mensaje = extraer_script_de_all_text(path)
+
+                        if exito:
+                            log_msg(
+                                f"✅ {mensaje}",
+                                color=ft.Colors.GREEN_700,
+                                weight="bold",
+                            )
+
+                            if tts_config.get("enabled"):
+                                log_msg(
+                                    "🔊 Generando audio con NVIDIA Magpie TTS...",
+                                    color=ft.Colors.BLUE_800,
+                                    italic=True,
+                                )
+                                tts_ok, tts_msg, ruta_audio = sintetizar_script_a_audio_nvidia(
+                                    path,
+                                    tts_config,
+                                )
+                                if tts_ok:
                                     log_msg(
-                                        "🎙️ Iniciando transcripción con WhisperX (esto puede tardar varios minutos)...",
-                                        color=ft.Colors.BLUE_800,
-                                        italic=True,
+                                        f"✅ {tts_msg}",
+                                        color=ft.Colors.GREEN_700,
+                                        weight="bold",
                                     )
-                                    wx_ok, wx_msg, ruta_json = transcribir_audio_whisperx(
-                                        ruta_audio, whisperx_config
-                                    )
-                                    if wx_ok:
+                                    # --- WhisperX: transcripción automática ---
+                                    if whisperx_config.get("enabled") and ruta_audio:
                                         log_msg(
-                                            f"✅ WhisperX: {wx_msg}",
-                                            color=ft.Colors.GREEN_700,
-                                            weight="bold",
+                                            "🎙️ Iniciando transcripción con WhisperX (esto puede tardar varios minutos)...",
+                                            color=ft.Colors.BLUE_800,
+                                            italic=True,
                                         )
-                                        ai_studio_runtime = normalizar_ai_studio_config(
-                                            config_actual.get("ai_studio"),
-                                            config_actual.get("prompt_ai_studio"),
+                                        wx_ok, wx_msg, ruta_json = transcribir_audio_whisperx(
+                                            ruta_audio, whisperx_config
                                         )
-                                        prompt_ai_base = ai_studio_runtime.get("prompt", "").strip()
-                                        if prompt_ai_base:
-                                            prompt_ai_ok, prompt_ai_msg, prompt_ai = construir_prompt_ai_studio(
-                                                prompt_ai_base,
-                                                path,
+                                        if wx_ok:
+                                            log_msg(
+                                                f"✅ WhisperX: {wx_msg}",
+                                                color=ft.Colors.GREEN_700,
+                                                weight="bold",
                                             )
-                                            if prompt_ai_ok:
-                                                log_msg(
-                                                    f"ℹ AI Studio: {prompt_ai_msg}",
-                                                    color=ft.Colors.BLUE_800,
-                                                    italic=True,
+                                            ai_studio_runtime = normalizar_ai_studio_config(
+                                                config_actual.get("ai_studio"),
+                                                config_actual.get("prompt_ai_studio"),
+                                            )
+                                            prompt_ai_base = ai_studio_runtime.get("prompt", "").strip()
+                                            if prompt_ai_base:
+                                                prompt_ai_ok, prompt_ai_msg, prompt_ai = construir_prompt_ai_studio(
+                                                    prompt_ai_base,
+                                                    path,
                                                 )
-                                                log_msg(
-                                                    "🤖 Abriendo Google AI Studio con el prompt configurado...",
-                                                    color=ft.Colors.BLUE_800,
-                                                    italic=True,
-                                                )
-                                                ai_ok, ai_msg = abrir_ai_studio_con_prompt(prompt_ai)
-                                                if ai_ok:
+                                                if prompt_ai_ok:
                                                     log_msg(
-                                                        f"✅ {ai_msg}",
-                                                        color=ft.Colors.GREEN_700,
-                                                        weight="bold",
-                                                    )
-                                                    espera_ai = ai_studio_runtime.get(
-                                                        "espera_respuesta_segundos",
-                                                        15,
-                                                    )
-                                                    log_msg(
-                                                        f"⏳ Esperando {espera_ai}s para la respuesta de AI Studio...",
+                                                        f"ℹ AI Studio: {prompt_ai_msg}",
                                                         color=ft.Colors.BLUE_800,
                                                         italic=True,
                                                     )
-                                                    if not sleep_cancelable(espera_ai, stop_event):
-                                                        detenido = True
-                                                    else:
+                                                    log_msg(
+                                                        "🤖 Abriendo Google AI Studio con el prompt configurado...",
+                                                        color=ft.Colors.BLUE_800,
+                                                        italic=True,
+                                                    )
+                                                    ai_ok, ai_msg = abrir_ai_studio_con_prompt(prompt_ai)
+                                                    if ai_ok:
                                                         log_msg(
-                                                            "📋 Copiando respuesta completa desde AI Studio...",
-                                                            color=ft.Colors.AMBER_800,
+                                                            f"✅ {ai_msg}",
+                                                            color=ft.Colors.GREEN_700,
+                                                            weight="bold",
                                                         )
-                                                        texto_ai_studio = extraer_respuesta_ai_studio(
-                                                            antibot=False
+                                                        espera_ai = ai_studio_runtime.get(
+                                                            "espera_respuesta_segundos",
+                                                            15,
                                                         )
-                                                        if stop_event.is_set():
+                                                        log_msg(
+                                                            f"⏳ Esperando {espera_ai}s para la respuesta de AI Studio...",
+                                                            color=ft.Colors.BLUE_800,
+                                                            italic=True,
+                                                        )
+                                                        if not sleep_cancelable(espera_ai, stop_event):
                                                             detenido = True
                                                         else:
-                                                            if texto_ai_studio:
-                                                                prompts_extraidos = extraer_prompts_ai_studio(
-                                                                    texto_ai_studio
-                                                                )
-                                                                if prompts_extraidos:
-                                                                    ruta_prompts = guardar_prompts_ai_studio(
-                                                                        path,
-                                                                        prompts_extraidos,
-                                                                        ai_studio_runtime.get(
-                                                                            "archivo_salida"
-                                                                        ),
+                                                            log_msg(
+                                                                "📋 Copiando respuesta completa desde AI Studio...",
+                                                                color=ft.Colors.AMBER_800,
+                                                            )
+                                                            texto_ai_studio = extraer_respuesta_ai_studio(
+                                                                antibot=False
+                                                            )
+                                                            if stop_event.is_set():
+                                                                detenido = True
+                                                            else:
+                                                                if texto_ai_studio:
+                                                                    prompts_extraidos = extraer_prompts_ai_studio(
+                                                                        texto_ai_studio
                                                                     )
-                                                                    log_msg(
-                                                                        f"✅ AI Studio: {len(prompts_extraidos)} prompt(s) guardados en {os.path.basename(ruta_prompts)}.",
-                                                                        color=ft.Colors.GREEN_700,
-                                                                        weight="bold",
-                                                                    )
-                                                                    if (
-                                                                        not stop_event.is_set()
-                                                                        and ai_studio_runtime.get(
-                                                                            "auto_send_to_extension",
-                                                                            False,
-                                                                        )
-                                                                    ):
-                                                                        log_msg(
-                                                                            "🖼️ Enviando prompts de imagen a la extensión Chrome...",
-                                                                            color=ft.Colors.TEAL_700,
-                                                                            italic=True,
-                                                                        )
-                                                                        img_ok, img_msg, _ = send_image_prompts_to_extension(
-                                                                            ruta_prompts,
-                                                                            modelo=ai_studio_runtime.get(
-                                                                                "imagen_model",
-                                                                                "imagen4",
+                                                                    if prompts_extraidos:
+                                                                        ruta_prompts = guardar_prompts_ai_studio(
+                                                                            path,
+                                                                            prompts_extraidos,
+                                                                            ai_studio_runtime.get(
+                                                                                "archivo_salida"
                                                                             ),
-                                                                            aspect_ratio=ai_studio_runtime.get(
-                                                                                "imagen_aspect_ratio",
-                                                                                "landscape",
-                                                                            ),
-                                                                            count=ai_studio_runtime.get(
-                                                                                "imagen_count",
-                                                                                1,
-                                                                            ),
-                                                                            reference_image_paths=list(ref_image_paths_state) if ref_image_paths_state else None,
-                                                                            reference_mode=dropdown_ref_mode.value or "ingredients",
-                                                                            project_folder=path,
                                                                         )
                                                                         log_msg(
-                                                                            f"{'✅' if img_ok else '⚠'} {img_msg}",
-                                                                            color=ft.Colors.GREEN_700 if img_ok else ft.Colors.ORANGE_700,
-                                                                            weight="bold" if img_ok else None,
+                                                                            f"✅ AI Studio: {len(prompts_extraidos)} prompt(s) guardados en {os.path.basename(ruta_prompts)}.",
+                                                                            color=ft.Colors.GREEN_700,
+                                                                            weight="bold",
+                                                                        )
+                                                                        if (
+                                                                            not stop_event.is_set()
+                                                                            and ai_studio_runtime.get(
+                                                                                "auto_send_to_extension",
+                                                                                False,
+                                                                            )
+                                                                        ):
+                                                                            log_msg(
+                                                                                "🖼️ Enviando prompts de imagen a la extensión Chrome...",
+                                                                                color=ft.Colors.TEAL_700,
+                                                                                italic=True,
+                                                                            )
+                                                                            img_ok, img_msg, _ = send_image_prompts_to_extension(
+                                                                                ruta_prompts,
+                                                                                modelo=ai_studio_runtime.get(
+                                                                                    "imagen_model",
+                                                                                    "imagen4",
+                                                                                ),
+                                                                                aspect_ratio=ai_studio_runtime.get(
+                                                                                    "imagen_aspect_ratio",
+                                                                                    "landscape",
+                                                                                ),
+                                                                                count=ai_studio_runtime.get(
+                                                                                    "imagen_count",
+                                                                                    1,
+                                                                                ),
+                                                                                reference_image_paths=list(ref_image_paths_state) if ref_image_paths_state else None,
+                                                                                reference_mode=dropdown_ref_mode.value or "ingredients",
+                                                                                project_folder=path,
+                                                                            )
+                                                                            log_msg(
+                                                                                f"{'✅' if img_ok else '⚠'} {img_msg}",
+                                                                                color=ft.Colors.GREEN_700 if img_ok else ft.Colors.ORANGE_700,
+                                                                                weight="bold" if img_ok else None,
+                                                                            )
+                                                                    else:
+                                                                        log_msg(
+                                                                            "⚠ AI Studio: no se encontraron etiquetas <prompt></prompt> en la respuesta copiada.",
+                                                                            color=ft.Colors.ORANGE_700,
                                                                         )
                                                                 else:
                                                                     log_msg(
-                                                                        "⚠ AI Studio: no se encontraron etiquetas <prompt></prompt> en la respuesta copiada.",
+                                                                        "⚠ AI Studio: no se pudo copiar la respuesta completa desde la ventana.",
                                                                         color=ft.Colors.ORANGE_700,
                                                                     )
-                                                            else:
-                                                                log_msg(
-                                                                    "⚠ AI Studio: no se pudo copiar la respuesta completa desde la ventana.",
-                                                                    color=ft.Colors.ORANGE_700,
-                                                                )
+                                                    else:
+                                                        log_msg(
+                                                            f"⚠ AI Studio: {ai_msg}",
+                                                            color=ft.Colors.ORANGE_700,
+                                                        )
                                                 else:
                                                     log_msg(
-                                                        f"⚠ AI Studio: {ai_msg}",
+                                                        f"⚠ AI Studio: {prompt_ai_msg}",
                                                         color=ft.Colors.ORANGE_700,
                                                     )
                                             else:
                                                 log_msg(
-                                                    f"⚠ AI Studio: {prompt_ai_msg}",
+                                                    "⚠ No se abrió AI Studio: el prompt está vacío. Configúralo en el tile de Configuración.",
                                                     color=ft.Colors.ORANGE_700,
                                                 )
                                         else:
                                             log_msg(
-                                                "⚠ No se abrió AI Studio: el prompt está vacío. Configúralo en el tile de Configuración.",
+                                                f"⚠ WhisperX: {wx_msg}",
                                                 color=ft.Colors.ORANGE_700,
                                             )
-                                    else:
-                                        log_msg(
-                                            f"⚠ WhisperX: {wx_msg}",
-                                            color=ft.Colors.ORANGE_700,
-                                        )
-                                # --- FIN WhisperX ---
-                            else:
-                                log_msg(f"⚠ {tts_msg}", color=ft.Colors.ORANGE_700)
-                    else:
-                        log_msg(f"⚠ {mensaje}", color=ft.Colors.ORANGE_700)
+                                    # --- FIN WhisperX ---
+                                else:
+                                    log_msg(f"⚠ {tts_msg}", color=ft.Colors.ORANGE_700)
+                        else:
+                            log_msg(f"⚠ {mensaje}", color=ft.Colors.ORANGE_700)
 
                     if detenido or stop_event.is_set():
                         log_msg(
@@ -3348,6 +3822,7 @@ def main(page: ft.Page):
                         ]
                     ),
                     btn_ejecutar_widget,
+                    txt_alcance_flujo,
                     btn_detener,
                     prg,
                     ft.Divider(),
@@ -3523,6 +3998,12 @@ def main(page: ft.Page):
         width=220,
         keyboard_type=ft.KeyboardType.NUMBER,
     )
+    dropdown_ejecutar_hasta = ft.Dropdown(
+        label="Ejecutar hasta prompt",
+        dense=True,
+        width=320,
+        options=[],
+    )
 
     def persistir_ai_studio_desde_ui(mostrar_snack=False):
         ai_studio_config["prompt"] = txt_prompt_ai_studio.value
@@ -3543,6 +4024,7 @@ def main(page: ft.Page):
 
     txt_prompt_ai_studio.on_blur = lambda e: persistir_ai_studio_desde_ui()
     txt_ai_studio_wait.on_blur = lambda e: persistir_ai_studio_desde_ui()
+    dropdown_ejecutar_hasta.on_change = lambda e: persistir_alcance_ejecucion()
 
     imagen_model_inicial = ai_studio_config.get("imagen_model", "imagen4")
     imagen_aspect_inicial = ai_studio_config.get("imagen_aspect_ratio", "landscape")
@@ -3607,6 +4089,22 @@ def main(page: ft.Page):
                         icon=ft.Icons.SAVE,
                         on_click=lambda e: persistir_whisperx_desde_ui(mostrar_snack=True),
                         bgcolor=ft.Colors.PURPLE_600,
+                        color="white",
+                    ),
+                    ft.Divider(),
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.FAST_FORWARD, color=ft.Colors.ORANGE_700),
+                            ft.Text("ALCANCE DE PRUEBA", weight="bold"),
+                        ]
+                    ),
+                    dropdown_ejecutar_hasta,
+                    txt_alcance_selector,
+                    ft.ElevatedButton(
+                        "Guardar alcance de prueba",
+                        icon=ft.Icons.SAVE,
+                        on_click=lambda e: persistir_alcance_ejecucion(mostrar_snack=True),
+                        bgcolor=ft.Colors.ORANGE_700,
                         color="white",
                     ),
                     ft.Divider(),
@@ -3694,6 +4192,9 @@ def main(page: ft.Page):
             ),
         ),
     )
+
+    actualizar_selector_ejecucion()
+    actualizar_resumen_alcance()
 
     # ==========================================
     # --- UI: GENERACIÓN DE IMÁGENES (FLOW AUTOMATOR) ---
