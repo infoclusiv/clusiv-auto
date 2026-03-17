@@ -32,6 +32,7 @@ PATH_AI_STUDIO = r"C:\Users\carlo\AppData\Roaming\Microsoft\Windows\Start Menu\P
 PROMPT_AI_STUDIO_SCRIPT_PLACEHOLDER = "[PEGAR TU GUION AQUÍ]"
 AI_STUDIO_OUTPUT_FILENAME_DEFAULT = "prompts_imagenes.txt"
 AI_STUDIO_WINDOW_TITLES = ("Google AI Studio", "AI Studio", "Gemini")
+FLOW_LABS_URL = "https://labs.google/fx/tools/flow"
 
 CONFIG_FILE = "config_automatizacion.json"
 DATABASE_FILE = "channels.db"
@@ -1077,8 +1078,10 @@ available_journeys = []
 extension_connected_event = threading.Event()
 extension_bridge_state = {
     "connected": False,
+    "status": "disconnected",
     "version": None,
     "last_seen": 0.0,
+    "last_error": None,
 }
 ws_request_waiters = {}
 ws_request_waiters_lock = threading.Lock()
@@ -1523,6 +1526,146 @@ def wait_for_extension_connection(timeout_s=10.0):
     return extension_connected_event.wait(timeout_s)
 
 
+def _open_flow_tab_for_extension(flow_url=FLOW_LABS_URL):
+    ultimo_error = None
+
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(flow_url)
+        else:
+            webbrowser.open_new_tab(flow_url)
+        return True, ""
+    except Exception as ex:
+        ultimo_error = ex
+
+    try:
+        opened = webbrowser.open_new_tab(flow_url)
+        if opened:
+            return True, ""
+    except Exception as ex:
+        ultimo_error = ex
+
+    detalle = str(ultimo_error) if ultimo_error else "sin detalle adicional"
+    return False, f"No se pudo abrir Google Labs Flow automáticamente: {detalle}"
+
+
+def _ping_extension_bridge(timeout_s=8.0, source="image-prompts"):
+    ok, pong, err = send_ws_request_and_wait(
+        {"action": "PING", "source": source},
+        expected_actions={"PONG"},
+        timeout_s=timeout_s,
+    )
+    if ok:
+        extension_bridge_state["connected"] = True
+        extension_bridge_state["status"] = "connected"
+        extension_bridge_state["last_seen"] = time.time()
+        extension_bridge_state["last_error"] = None
+        if pong and pong.get("version"):
+            extension_bridge_state["version"] = pong.get("version")
+    else:
+        extension_bridge_state["status"] = (
+            "connected_unresponsive" if extension_connected_event.is_set() else "disconnected"
+        )
+        extension_bridge_state["last_error"] = err
+    return ok, pong, err
+
+
+def bootstrap_extension_bridge(
+    flow_url=FLOW_LABS_URL,
+    attempts=2,
+    connect_timeout_s=6.0,
+    ping_timeout_s=6.0,
+    reason="",
+):
+    ultimo_error = reason or "La extensión no respondió al bridge."
+
+    for intento in range(1, max(1, attempts) + 1):
+        extension_bridge_state["status"] = "bootstrapping"
+        extension_bridge_state["last_error"] = ultimo_error
+
+        if ui_log_cb:
+            ui_log_cb(
+                f"🧩 Intentando despertar la extensión y Google Flow ({intento}/{attempts})...",
+                color=ft.Colors.BLUE_700,
+                italic=True,
+            )
+        set_image_status(
+            f"Activando extensión Chrome y Google Flow ({intento}/{attempts})...",
+            ft.Colors.BLUE_700,
+        )
+
+        opened, open_err = _open_flow_tab_for_extension(flow_url)
+        if not opened and open_err:
+            ultimo_error = open_err
+            if ui_log_cb:
+                ui_log_cb(f"⚠ {open_err}", color=ft.Colors.ORANGE_700)
+
+        if wait_for_extension_connection(timeout_s=max(1.0, connect_timeout_s)):
+            ok, _, err = _ping_extension_bridge(
+                timeout_s=max(1.0, ping_timeout_s),
+                source="bridge-bootstrap",
+            )
+            if ok:
+                mensaje = "La extensión respondió nuevamente al orquestador."
+                if ui_log_cb:
+                    ui_log_cb(f"✅ {mensaje}", color=ft.Colors.TEAL_700)
+                return True, mensaje
+            ultimo_error = err or "La extensión se conectó, pero no respondió al ping."
+        else:
+            ultimo_error = (
+                "La extensión no abrió el bridge con Clusiv después de intentar levantar Google Flow."
+            )
+
+        extension_bridge_state["last_error"] = ultimo_error
+
+        if intento < attempts:
+            time.sleep(1.5)
+
+    extension_bridge_state["status"] = "disconnected"
+    return False, ultimo_error
+
+
+def _ensure_extension_bridge_alive(flow_url=FLOW_LABS_URL, timeout_s=35.0):
+    handshake_timeout = min(timeout_s, 3.0)
+    ping_timeout = min(timeout_s, 8.0)
+
+    if wait_for_extension_connection(timeout_s=handshake_timeout):
+        ok, pong, err = _ping_extension_bridge(
+            timeout_s=ping_timeout,
+            source="image-prompts",
+        )
+        if ok:
+            return True, pong, ""
+        motivo_bootstrap = err
+    else:
+        motivo_bootstrap = "La extensión Chrome no se conectó al orquestador a tiempo."
+
+    if ui_log_cb:
+        ui_log_cb(
+            f"⚠ {motivo_bootstrap}",
+            color=ft.Colors.ORANGE_700,
+        )
+
+    boot_ok, boot_msg = bootstrap_extension_bridge(
+        flow_url=flow_url,
+        attempts=2,
+        connect_timeout_s=min(timeout_s, 7.0),
+        ping_timeout_s=ping_timeout,
+        reason=motivo_bootstrap,
+    )
+    if not boot_ok:
+        return False, None, boot_msg
+
+    ok, pong, err = _ping_extension_bridge(
+        timeout_s=ping_timeout,
+        source="image-prompts-post-bootstrap",
+    )
+    if not ok:
+        return False, None, err
+
+    return True, pong, ""
+
+
 def send_ws_request_and_wait(msg_dict, expected_actions=None, timeout_s=10.0):
     if not isinstance(msg_dict, dict):
         return False, None, "Mensaje WS inválido."
@@ -1551,7 +1694,7 @@ def send_ws_request_and_wait(msg_dict, expected_actions=None, timeout_s=10.0):
     return True, data, ""
 
 
-def ensure_extension_ready_for_images(flow_url="https://labs.google/fx/tools/flow", timeout_s=35.0):
+def ensure_extension_ready_for_images(flow_url=FLOW_LABS_URL, timeout_s=35.0):
     if ui_log_cb:
         ui_log_cb(
             "🔌 Verificando conexión con la extensión Chrome...",
@@ -1559,60 +1702,76 @@ def ensure_extension_ready_for_images(flow_url="https://labs.google/fx/tools/flo
         )
     set_image_status("Verificando extensión Chrome...", ft.Colors.BLUE_700)
 
-    if not wait_for_extension_connection(timeout_s=min(timeout_s, 12.0)):
-        return False, "La extensión Chrome no se conectó al orquestador a tiempo."
+    last_error = ""
+    max_attempts = 2
 
-    ok, pong, err = send_ws_request_and_wait(
-        {"action": "PING", "source": "image-prompts"},
-        expected_actions={"PONG"},
-        timeout_s=min(timeout_s, 8.0),
-    )
-    if not ok:
-        return False, err
-
-    extension_bridge_state["last_seen"] = time.time()
-    if pong and pong.get("version"):
-        extension_bridge_state["version"] = pong.get("version")
-
-    if ui_log_cb:
-        ui_log_cb(
-            "🌐 Preparando Google Labs Flow en Chrome...",
-            color=ft.Colors.BLUE_700,
+    for intento in range(1, max_attempts + 1):
+        bridge_ok, pong, err = _ensure_extension_bridge_alive(
+            flow_url=flow_url,
+            timeout_s=timeout_s,
         )
-    set_image_status("Abriendo o validando Google Labs Flow...", ft.Colors.BLUE_700)
+        if not bridge_ok:
+            last_error = err
+            if intento < max_attempts:
+                continue
+            return False, err
 
-    ok, ready, err = send_ws_request_and_wait(
-        {
-            "action": "ENSURE_FLOW_READY",
-            "url": flow_url,
-            "openIfMissing": True,
-            "timeoutMs": int(timeout_s * 1000),
-        },
-        expected_actions={"FLOW_READY_STATUS"},
-        timeout_s=timeout_s,
-    )
-    if not ok:
-        return False, err
+        if pong and pong.get("version"):
+            extension_bridge_state["version"] = pong.get("version")
 
-    if not ready or not ready.get("ok"):
-        return False, (ready or {}).get("message") or "Flow no quedó listo para procesar prompts."
+        if ui_log_cb:
+            ui_log_cb(
+                "🌐 Preparando Google Labs Flow en Chrome...",
+                color=ft.Colors.BLUE_700,
+            )
+        set_image_status("Abriendo o validando Google Labs Flow...", ft.Colors.BLUE_700)
 
-    mensaje = ready.get("message") or "Google Labs Flow listo."
-    set_image_status("Google Labs Flow listo para procesar prompts.", ft.Colors.TEAL_700)
-    if ui_log_cb:
-        ui_log_cb(
-            f"✅ {mensaje}",
-            color=ft.Colors.TEAL_700,
-            weight="bold",
+        ok, ready, err = send_ws_request_and_wait(
+            {
+                "action": "ENSURE_FLOW_READY",
+                "url": flow_url,
+                "openIfMissing": True,
+                "timeoutMs": int(timeout_s * 1000),
+            },
+            expected_actions={"FLOW_READY_STATUS"},
+            timeout_s=timeout_s,
         )
-    return True, mensaje
+        if ok and ready and ready.get("ok"):
+            mensaje = ready.get("message") or "Google Labs Flow listo."
+            extension_bridge_state["status"] = "flow_ready"
+            extension_bridge_state["last_error"] = None
+            set_image_status("Google Labs Flow listo para procesar prompts.", ft.Colors.TEAL_700)
+            if ui_log_cb:
+                ui_log_cb(
+                    f"✅ {mensaje}",
+                    color=ft.Colors.TEAL_700,
+                    weight="bold",
+                )
+            return True, mensaje
+
+        last_error = err or (ready or {}).get("message") or "Flow no quedó listo para procesar prompts."
+        extension_bridge_state["status"] = "flow_not_ready"
+        extension_bridge_state["last_error"] = last_error
+
+        if intento < max_attempts:
+            if ui_log_cb:
+                ui_log_cb(
+                    f"⚠ {last_error} Reintentando preparación de Flow...",
+                    color=ft.Colors.ORANGE_700,
+                )
+            _open_flow_tab_for_extension(flow_url)
+            time.sleep(1.5)
+
+    return False, last_error or "Flow no quedó listo para procesar prompts."
 
 async def ws_handler(websocket):
     global active_ws_connection, available_journeys
     active_ws_connection = websocket
     extension_connected_event.set()
     extension_bridge_state["connected"] = True
+    extension_bridge_state["status"] = "connected"
     extension_bridge_state["last_seen"] = time.time()
+    extension_bridge_state["last_error"] = None
 
     if ui_log_cb:
         ui_log_cb("🟢 Extensión web conectada al orquestador", color=ft.Colors.GREEN_700, weight="bold")
@@ -1662,8 +1821,10 @@ async def ws_handler(websocket):
             elif accion == "EXTENSION_CONNECTED":
                 version = data.get("version", "?")
                 extension_bridge_state["connected"] = True
+                extension_bridge_state["status"] = "connected"
                 extension_bridge_state["version"] = version
                 extension_bridge_state["last_seen"] = time.time()
+                extension_bridge_state["last_error"] = None
                 extension_connected_event.set()
                 if ui_log_cb:
                     ui_log_cb(
@@ -1732,7 +1893,9 @@ async def ws_handler(websocket):
         active_ws_connection = None
         extension_connected_event.clear()
         extension_bridge_state["connected"] = False
+        extension_bridge_state["status"] = "disconnected"
         extension_bridge_state["last_seen"] = 0.0
+        extension_bridge_state["last_error"] = "La extensión cerró la conexión con el orquestador."
         reset_pending_journey_chain()
         if ui_log_cb:
             ui_log_cb("🔴 Extensión web desconectada. Esperando reconexión...", color=ft.Colors.ORANGE_700, weight="bold")
