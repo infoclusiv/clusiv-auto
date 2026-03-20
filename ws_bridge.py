@@ -60,6 +60,7 @@ pending_image_download_lock = threading.Lock()
 ui_update_journeys_cb = None
 ui_log_cb = None
 ui_image_status_cb = None
+ui_ext_status_cb = None
 
 
 def reset_pending_journey_chain():
@@ -724,6 +725,9 @@ async def ws_handler(websocket):
     extension_bridge_state["last_seen"] = time.time()
     extension_bridge_state["last_error"] = None
 
+    if ui_ext_status_cb:
+        ui_ext_status_cb(True, extension_bridge_state.get("version") or "")
+
     if ui_log_cb:
         ui_log_cb("🟢 Extension web conectada al orquestador", color=ft.Colors.GREEN_700, weight="bold")
 
@@ -781,6 +785,8 @@ async def ws_handler(websocket):
                 extension_bridge_state["last_seen"] = time.time()
                 extension_bridge_state["last_error"] = None
                 extension_connected_event.set()
+                if ui_ext_status_cb:
+                    ui_ext_status_cb(True, version)
                 if ui_log_cb:
                     ui_log_cb(
                         f"🔗 Flow Image Automator v{version} conectado y listo.",
@@ -852,6 +858,8 @@ async def ws_handler(websocket):
         extension_bridge_state["last_seen"] = 0.0
         extension_bridge_state["last_error"] = "La extension cerro la conexion con el orquestador."
         reset_pending_journey_chain()
+        if ui_ext_status_cb:
+            ui_ext_status_cb(False, "")
         if ui_log_cb:
             ui_log_cb("🔴 Extension web desconectada. Esperando reconexion...", color=ft.Colors.ORANGE_700, weight="bold")
 

@@ -54,6 +54,8 @@ class FlowContext:
         page,
         set_estado_ejecutando,
         obtener_prompts_para_ejecucion,
+        set_fase_estado=None,
+        reset_tracker=None,
     ):
         self.stop_event = stop_event
         self.log_msg = log_msg
@@ -70,6 +72,8 @@ class FlowContext:
         self.page = page
         self.set_estado_ejecutando = set_estado_ejecutando
         self.obtener_prompts_para_ejecucion = obtener_prompts_para_ejecucion
+        self.set_fase_estado = set_fase_estado or (lambda *args, **kwargs: None)
+        self.reset_tracker = reset_tracker or (lambda: None)
 
 
 def abrir_y_pegar_chatgpt(prompt_final, modo="nueva", antibot=False, wpm=45, stop_event=None):
@@ -493,9 +497,20 @@ def ejecutar_flujo(ctx: FlowContext):
 
     def proceso_hilo():
         detenido = False
+        fase_actual = {"id": None}
+
+        def marcar_fase(fase_id, estado, detalle=""):
+            if estado == "running":
+                fase_actual["id"] = fase_id
+            elif fase_actual["id"] == fase_id:
+                fase_actual["id"] = None
+            ctx.set_fase_estado(fase_id, estado, detalle)
+
         try:
             canales = obtener_canales_db()
             ganadores_totales = []
+
+            marcar_fase("youtube", "running", "Consultando YouTube API...")
 
             for ch_id, ch_name, _ in canales:
                 if ctx.stop_event.is_set():
@@ -509,6 +524,8 @@ def ejecutar_flujo(ctx: FlowContext):
                     ganadores_totales.append(video)
 
             if detenido or ctx.stop_event.is_set():
+                if fase_actual["id"]:
+                    marcar_fase(fase_actual["id"], "error", "Detenido por usuario")
                 ctx.log_msg(
                     "⛔ Flujo detenido por el usuario durante el análisis de canales.",
                     color=ft.Colors.RED_700,
@@ -520,6 +537,7 @@ def ejecutar_flujo(ctx: FlowContext):
                 return
 
             if not ganadores_totales:
+                marcar_fase("youtube", "error", "No se encontraron videos ganadores")
                 ctx.log_msg(
                     "❌ No se encontraron videos ganadores.",
                     color=ft.Colors.RED,
@@ -531,6 +549,7 @@ def ejecutar_flujo(ctx: FlowContext):
 
             mejor = max(ganadores_totales, key=lambda item: item["views"])
             titulo_ref = mejor["title"]
+            marcar_fase("youtube", "done", f"Ref: {titulo_ref[:35]}...")
 
             num = obtener_siguiente_num(ctx.ruta_base[0])
             path = os.path.join(ctx.ruta_base[0], f"video {num}")
@@ -556,6 +575,11 @@ def ejecutar_flujo(ctx: FlowContext):
                     break
 
                 nombre_prompt = prompt.get("nombre", f"Prompt {idx + 1}")
+                marcar_fase(
+                    "chatgpt",
+                    "running",
+                    f"Prompt {idx + 1}/{len(prompts_a_ejecutar)}: {nombre_prompt}",
+                )
                 post_accion = prompt.get("post_accion", "solo_enviar")
                 modo = prompt.get("modo", "nueva")
                 espera = prompt.get("espera_segundos", 30)
@@ -766,8 +790,17 @@ def ejecutar_flujo(ctx: FlowContext):
                             detenido = True
                             break
 
+            if not detenido and not ctx.stop_event.is_set():
+                marcar_fase(
+                    "chatgpt",
+                    "done",
+                    f"{len(prompts_a_ejecutar)} prompts completados",
+                )
+
             ctx.log_msg("", is_divider=True)
             if detenido or ctx.stop_event.is_set():
+                if fase_actual["id"]:
+                    marcar_fase(fase_actual["id"], "error", "Detenido por usuario")
                 ctx.log_msg(
                     f"⛔ FLUJO DETENIDO por el usuario en video {num}",
                     color=ft.Colors.RED_700,
@@ -795,11 +828,21 @@ def ejecutar_flujo(ctx: FlowContext):
                             )
 
                     if not os.path.exists(ruta_all_text) and all_text_esperado:
+                        marcar_fase("texto", "skipped", "No se generó all_text.txt")
+                        marcar_fase("tts", "skipped", "Sin script")
+                        marcar_fase("whisperx", "skipped", "Sin audio")
+                        marcar_fase("aistudio", "skipped", "Sin transcripción")
+                        marcar_fase("flow", "skipped", "Sin prompts de imagen")
                         ctx.log_msg(
                             "⚠ Se omitió el postproceso final porque no se generó all_text.txt en esta corrida.",
                             color=ft.Colors.ORANGE_700,
                         )
                     elif not os.path.exists(ruta_all_text):
+                        marcar_fase("texto", "skipped", "Sin bloques teleprompter")
+                        marcar_fase("tts", "skipped", "Sin script")
+                        marcar_fase("whisperx", "skipped", "Sin audio")
+                        marcar_fase("aistudio", "skipped", "Sin transcripción")
+                        marcar_fase("flow", "skipped", "Sin prompts de imagen")
                         ctx.log_msg(
                             f"ℹ Se omite el postproceso final porque el alcance '{alcance_actual}' no dejó bloques teleprompter reutilizables.",
                             color=ft.Colors.BLUE_800,
@@ -807,6 +850,7 @@ def ejecutar_flujo(ctx: FlowContext):
                         )
 
                 if os.path.exists(ruta_all_text):
+                    marcar_fase("texto", "running", "Extrayendo bloques teleprompter...")
                     ctx.log_msg(
                         "📄 Buscando all_text.txt para extraer script...",
                         color=ft.Colors.BLUE_800,
@@ -816,6 +860,7 @@ def ejecutar_flujo(ctx: FlowContext):
                     exito, mensaje = extraer_script_de_all_text(path)
 
                     if exito:
+                        marcar_fase("texto", "done", mensaje)
                         ctx.log_msg(
                             f"✅ {mensaje}",
                             color=ft.Colors.GREEN_700,
@@ -823,6 +868,7 @@ def ejecutar_flujo(ctx: FlowContext):
                         )
 
                         if ctx.tts_config.get("enabled"):
+                            marcar_fase("tts", "running", "Sintetizando audio...")
                             ctx.log_msg(
                                 "🔊 Generando audio con NVIDIA Magpie TTS...",
                                 color=ft.Colors.BLUE_800,
@@ -833,12 +879,14 @@ def ejecutar_flujo(ctx: FlowContext):
                                 ctx.tts_config,
                             )
                             if tts_ok:
+                                marcar_fase("tts", "done", tts_msg)
                                 ctx.log_msg(
                                     f"✅ {tts_msg}",
                                     color=ft.Colors.GREEN_700,
                                     weight="bold",
                                 )
                                 if ctx.whisperx_config.get("enabled") and ruta_audio:
+                                    marcar_fase("whisperx", "running", "Transcribiendo con WhisperX...")
                                     ctx.log_msg(
                                         "🎙️ Iniciando transcripción con WhisperX (esto puede tardar varios minutos)...",
                                         color=ft.Colors.BLUE_800,
@@ -847,6 +895,11 @@ def ejecutar_flujo(ctx: FlowContext):
                                     wx_ok, wx_msg, ruta_json = transcribir_audio_whisperx(
                                         ruta_audio,
                                         ctx.whisperx_config,
+                                    )
+                                    marcar_fase(
+                                        "whisperx",
+                                        "done" if wx_ok else "error",
+                                        wx_msg,
                                     )
                                     if wx_ok:
                                         ctx.log_msg(
@@ -865,6 +918,15 @@ def ejecutar_flujo(ctx: FlowContext):
                                                 path,
                                             )
                                             if prompt_ai_ok:
+                                                espera_ai = ai_studio_runtime.get(
+                                                    "espera_respuesta_segundos",
+                                                    15,
+                                                )
+                                                marcar_fase(
+                                                    "aistudio",
+                                                    "running",
+                                                    f"Esperando {espera_ai}s respuesta AI Studio...",
+                                                )
                                                 ctx.log_msg(
                                                     f"ℹ AI Studio: {prompt_ai_msg}",
                                                     color=ft.Colors.BLUE_800,
@@ -881,10 +943,6 @@ def ejecutar_flujo(ctx: FlowContext):
                                                         f"✅ {ai_msg}",
                                                         color=ft.Colors.GREEN_700,
                                                         weight="bold",
-                                                    )
-                                                    espera_ai = ai_studio_runtime.get(
-                                                        "espera_respuesta_segundos",
-                                                        15,
                                                     )
                                                     ctx.log_msg(
                                                         f"⏳ Esperando {espera_ai}s para la respuesta de AI Studio...",
@@ -910,6 +968,11 @@ def ejecutar_flujo(ctx: FlowContext):
                                                                     texto_ai_studio
                                                                 )
                                                                 if prompts_extraidos:
+                                                                    marcar_fase(
+                                                                        "aistudio",
+                                                                        "done",
+                                                                        f"{len(prompts_extraidos)} prompts extraídos",
+                                                                    )
                                                                     ruta_prompts = guardar_prompts_ai_studio(
                                                                         path,
                                                                         prompts_extraidos,
@@ -929,6 +992,11 @@ def ejecutar_flujo(ctx: FlowContext):
                                                                             False,
                                                                         )
                                                                     ):
+                                                                        marcar_fase(
+                                                                            "flow",
+                                                                            "running",
+                                                                            f"Enviando {len(prompts_extraidos)} prompts a extensión...",
+                                                                        )
                                                                         ctx.log_msg(
                                                                             "🖼️ Enviando prompts de imagen a la extensión Chrome...",
                                                                             color=ft.Colors.TEAL_700,
@@ -952,50 +1020,132 @@ def ejecutar_flujo(ctx: FlowContext):
                                                                             reference_mode=ctx.dropdown_ref_mode.value or "ingredients",
                                                                             project_folder=path,
                                                                         )
+                                                                        marcar_fase(
+                                                                            "flow",
+                                                                            "done" if img_ok else "error",
+                                                                            img_msg,
+                                                                        )
                                                                         ctx.log_msg(
                                                                             f"{'✅' if img_ok else '⚠'} {img_msg}",
                                                                             color=ft.Colors.GREEN_700 if img_ok else ft.Colors.ORANGE_700,
                                                                             weight="bold" if img_ok else None,
                                                                         )
+                                                                    else:
+                                                                        marcar_fase(
+                                                                            "flow",
+                                                                            "skipped",
+                                                                            "Autoenvío deshabilitado",
+                                                                        )
                                                                 else:
+                                                                    marcar_fase(
+                                                                        "aistudio",
+                                                                        "error",
+                                                                        "Sin etiquetas <prompt>",
+                                                                    )
+                                                                    marcar_fase(
+                                                                        "flow",
+                                                                        "skipped",
+                                                                        "Sin prompts de imagen",
+                                                                    )
                                                                     ctx.log_msg(
                                                                         "⚠ AI Studio: no se encontraron etiquetas <prompt></prompt> en la respuesta copiada.",
                                                                         color=ft.Colors.ORANGE_700,
                                                                     )
                                                             else:
+                                                                marcar_fase(
+                                                                    "aistudio",
+                                                                    "error",
+                                                                    "No se pudo copiar la respuesta",
+                                                                )
+                                                                marcar_fase(
+                                                                    "flow",
+                                                                    "skipped",
+                                                                    "Sin prompts de imagen",
+                                                                )
                                                                 ctx.log_msg(
                                                                     "⚠ AI Studio: no se pudo copiar la respuesta completa desde la ventana.",
                                                                     color=ft.Colors.ORANGE_700,
                                                                 )
                                                 else:
+                                                    marcar_fase("aistudio", "error", ai_msg)
+                                                    marcar_fase(
+                                                        "flow",
+                                                        "skipped",
+                                                        "Sin prompts de imagen",
+                                                    )
                                                     ctx.log_msg(
                                                         f"⚠ AI Studio: {ai_msg}",
                                                         color=ft.Colors.ORANGE_700,
                                                     )
                                             else:
+                                                marcar_fase("aistudio", "error", prompt_ai_msg)
+                                                marcar_fase(
+                                                    "flow",
+                                                    "skipped",
+                                                    "Sin prompts de imagen",
+                                                )
                                                 ctx.log_msg(
                                                     f"⚠ AI Studio: {prompt_ai_msg}",
                                                     color=ft.Colors.ORANGE_700,
                                                 )
                                         else:
+                                            marcar_fase("aistudio", "skipped", "Prompt vacío")
+                                            marcar_fase(
+                                                "flow",
+                                                "skipped",
+                                                "Sin prompts de imagen",
+                                            )
                                             ctx.log_msg(
                                                 "⚠ No se abrió AI Studio: el prompt está vacío. Configúralo en el tile de Configuración.",
                                                 color=ft.Colors.ORANGE_700,
                                             )
                                     else:
+                                        marcar_fase("aistudio", "skipped", "WhisperX falló")
+                                        marcar_fase(
+                                            "flow",
+                                            "skipped",
+                                            "Sin prompts de imagen",
+                                        )
                                         ctx.log_msg(
                                             f"⚠ WhisperX: {wx_msg}",
                                             color=ft.Colors.ORANGE_700,
                                         )
+                                else:
+                                    if ctx.whisperx_config.get("enabled"):
+                                        marcar_fase(
+                                            "whisperx",
+                                            "skipped",
+                                            "Sin audio para transcribir",
+                                        )
+                                    else:
+                                        marcar_fase("whisperx", "skipped", "Deshabilitado")
+                                    marcar_fase("aistudio", "skipped", "Requiere WhisperX")
+                                    marcar_fase("flow", "skipped", "Sin prompts de imagen")
                             else:
+                                marcar_fase("tts", "error", tts_msg)
+                                marcar_fase("whisperx", "skipped", "Sin audio")
+                                marcar_fase("aistudio", "skipped", "Sin transcripción")
+                                marcar_fase("flow", "skipped", "Sin prompts de imagen")
                                 ctx.log_msg(
                                     f"⚠ {tts_msg}",
                                     color=ft.Colors.ORANGE_700,
                                 )
+                        else:
+                            marcar_fase("tts", "skipped", "Deshabilitado")
+                            marcar_fase("whisperx", "skipped", "Deshabilitado")
+                            marcar_fase("aistudio", "skipped", "Requiere WhisperX")
+                            marcar_fase("flow", "skipped", "Sin prompts de imagen")
                     else:
+                        marcar_fase("texto", "error", mensaje)
+                        marcar_fase("tts", "skipped", "Sin script")
+                        marcar_fase("whisperx", "skipped", "Sin audio")
+                        marcar_fase("aistudio", "skipped", "Sin transcripción")
+                        marcar_fase("flow", "skipped", "Sin prompts de imagen")
                         ctx.log_msg(f"⚠ {mensaje}", color=ft.Colors.ORANGE_700)
 
                 if detenido or ctx.stop_event.is_set():
+                    if fase_actual["id"]:
+                        marcar_fase(fase_actual["id"], "error", "Detenido por usuario")
                     ctx.log_msg(
                         f"⛔ FLUJO DETENIDO por el usuario en video {num}",
                         color=ft.Colors.RED_700,
@@ -1009,6 +1159,8 @@ def ejecutar_flujo(ctx: FlowContext):
                     )
 
         except Exception as ex:
+            if fase_actual["id"]:
+                marcar_fase(fase_actual["id"], "error", str(ex))
             ctx.log_msg(f"❌ Error: {str(ex)}", color=ft.Colors.RED)
 
         ctx.prg.visible = False

@@ -43,8 +43,8 @@ def main(page: ft.Page):
     page.title = "Clusiv Automation Hub"
     page.theme_mode = ft.ThemeMode.LIGHT
     page.bgcolor = "#F0F2F6"
-    page.padding = 20
-    page.scroll = ft.ScrollMode.AUTO
+    page.padding = 0
+    page.scroll = None
 
     init_db()
     config_actual = cargar_toda_config()
@@ -74,7 +74,7 @@ def main(page: ft.Page):
     # UI Elements
     input_id = ft.TextField(label="ID del Canal", expand=True)
     input_name = ft.TextField(label="Nombre del Canal", expand=True)
-    lista_canales_ui = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, height=400)
+    lista_canales_ui = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, height=300)
     log_ui = ft.Column(
         spacing=6,
         scroll=ft.ScrollMode.AUTO,
@@ -82,7 +82,7 @@ def main(page: ft.Page):
     )
     log_container = ft.Container(
         content=log_ui,
-        height=350,
+        expand=True,
         border_radius=10,
         bgcolor="#F8F9FA",
         border=ft.border.all(1, ft.Colors.GREY_300),
@@ -174,15 +174,16 @@ def main(page: ft.Page):
 
     ws_bridge.ui_log_cb = log_msg
 
-    image_status_ref = [None]
+    image_status_refs = []
 
     def actualizar_estado_imagen(texto, color=ft.Colors.GREY_500):
-        status_control = image_status_ref[0]
-        if status_control is None:
+        if not image_status_refs:
             return
-        status_control.value = texto
-        status_control.color = color
-        page.update()
+        for status_control in image_status_refs:
+            status_control.value = texto
+            status_control.color = color
+        if page.controls:
+            page.update()
 
     ws_bridge.ui_image_status_cb = actualizar_estado_imagen
 
@@ -839,6 +840,105 @@ def main(page: ft.Page):
             input_name.value = ""
             refrescar_canales()
 
+    def construir_tracker_fases(page):
+        fases = [
+            ("youtube", "📺", "Análisis YouTube"),
+            ("chatgpt", "💬", "ChatGPT - Prompts"),
+            ("texto", "📄", "Post-proceso texto"),
+            ("tts", "🔊", "Síntesis TTS"),
+            ("whisperx", "🎙️", "Transcripción"),
+            ("aistudio", "🤖", "Prompts de imagen"),
+            ("flow", "🖼️", "Generación imágenes"),
+        ]
+        color_map = {
+            "pending": ft.Colors.GREY_400,
+            "running": ft.Colors.BLUE_500,
+            "done": ft.Colors.GREEN_600,
+            "error": ft.Colors.RED_500,
+            "skipped": ft.Colors.AMBER_500,
+        }
+        icon_map = {
+            "pending": ft.Icons.RADIO_BUTTON_UNCHECKED,
+            "running": ft.Icons.SYNC,
+            "done": ft.Icons.CHECK_CIRCLE_OUTLINE,
+            "error": ft.Icons.ERROR_OUTLINE,
+            "skipped": ft.Icons.SKIP_NEXT,
+        }
+
+        controles = {}
+        filas = []
+
+        for fase_id, icono, nombre in fases:
+            indicador = ft.Icon(
+                ft.Icons.RADIO_BUTTON_UNCHECKED,
+                color=ft.Colors.GREY_400,
+                size=16,
+            )
+            lbl_detalle = ft.Text("-", size=10, color=ft.Colors.GREY_400, italic=True)
+            fila = ft.Container(
+                content=ft.Row(
+                    [
+                        indicador,
+                        ft.Column(
+                            [
+                                ft.Text(f"{icono}  {nombre}", size=12, weight="bold"),
+                                lbl_detalle,
+                            ],
+                            spacing=1,
+                            tight=True,
+                        ),
+                    ],
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                padding=ft.padding.symmetric(horizontal=10, vertical=6),
+                border_radius=8,
+                bgcolor=ft.Colors.GREY_50,
+                border=ft.border.all(1, ft.Colors.GREY_200),
+            )
+            controles[fase_id] = {"icono": indicador, "label": lbl_detalle, "row": fila}
+            filas.append(fila)
+
+        def set_fase_estado(fase_id, estado, detalle="", refresh=True):
+            control = controles.get(fase_id)
+            if not control:
+                return
+
+            color = color_map.get(estado, ft.Colors.GREY_400)
+            control["icono"].name = icon_map.get(
+                estado, ft.Icons.RADIO_BUTTON_UNCHECKED
+            )
+            control["icono"].color = color
+            control["label"].value = detalle or estado
+            control["label"].color = color
+
+            if estado == "running":
+                control["row"].bgcolor = "#EBF8FF"
+                control["row"].border = ft.border.all(1, ft.Colors.BLUE_300)
+            elif estado == "done":
+                control["row"].bgcolor = "#F0FFF4"
+                control["row"].border = ft.border.all(1, ft.Colors.GREEN_300)
+            elif estado == "error":
+                control["row"].bgcolor = "#FFF5F5"
+                control["row"].border = ft.border.all(1, ft.Colors.RED_200)
+            elif estado == "skipped":
+                control["row"].bgcolor = "#FFFBEB"
+                control["row"].border = ft.border.all(1, ft.Colors.AMBER_200)
+            else:
+                control["row"].bgcolor = ft.Colors.GREY_50
+                control["row"].border = ft.border.all(1, ft.Colors.GREY_200)
+
+            if refresh and page.controls:
+                page.update()
+
+        def reset_tracker():
+            for fase_id, _, _ in fases:
+                set_fase_estado(fase_id, "pending", "-", refresh=False)
+            if page.controls:
+                page.update()
+
+        return ft.Column(filas, spacing=4), set_fase_estado, reset_tracker
+
     # --- FLUJO PRINCIPAL (basado en lista de prompts) ---
     def ejecutar_flujo_completo(e):
         if not ruta_base[0]:
@@ -856,6 +956,7 @@ def main(page: ft.Page):
         log_ui.controls.clear()
         prg.visible = True
         set_estado_ejecutando(True)
+        reset_tracker()
         page.update()
         ctx = FlowContext(
             stop_event=stop_event,
@@ -873,37 +974,10 @@ def main(page: ft.Page):
             page=page,
             set_estado_ejecutando=set_estado_ejecutando,
             obtener_prompts_para_ejecucion=obtener_prompts_para_ejecucion,
+            set_fase_estado=set_fase_estado,
+            reset_tracker=reset_tracker,
         )
         ejecutar_flujo(ctx)
-
-    # --- UI LAYOUT ---
-    tile_gestion = ft.Card(
-        col={"md": 4},
-        content=ft.Container(
-            padding=20,
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.PEOPLE_ALT),
-                            ft.Text("CANALES", weight="bold"),
-                        ]
-                    ),
-                    ft.Row([input_id, input_name]),
-                    ft.ElevatedButton(
-                        "Agregar",
-                        icon=ft.Icons.ADD,
-                        on_click=agregar_canal,
-                        width=1000,
-                        bgcolor=ft.Colors.BLUE_800,
-                        color="white",
-                    ),
-                    ft.Divider(),
-                    lista_canales_ui,
-                ]
-            ),
-        ),
-    )
 
     btn_ejecutar_widget = ft.ElevatedButton(
         "EJECUTAR FLUJO COMPLETO",
@@ -915,45 +989,6 @@ def main(page: ft.Page):
         width=1000,
     )
     btn_ejecutar_ref[0] = btn_ejecutar_widget
-
-    tile_flujo = ft.Card(
-        col={"md": 4},
-        content=ft.Container(
-            padding=20,
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.BOLT, color=ft.Colors.AMBER_700),
-                            ft.Text("AUTOMATIZACIÓN", weight="bold"),
-                        ]
-                    ),
-                    btn_ejecutar_widget,
-                    txt_alcance_flujo,
-                    btn_detener,
-                    prg,
-                    ft.Divider(),
-                    ft.Row(
-                        [
-                            ft.Icon(
-                                ft.Icons.TERMINAL,
-                                size=16,
-                                color=ft.Colors.GREY_500,
-                            ),
-                            ft.Text(
-                                "Consola de ejecución",
-                                size=12,
-                                color=ft.Colors.GREY_500,
-                                italic=True,
-                            ),
-                        ],
-                        spacing=6,
-                    ),
-                    log_container,
-                ]
-            ),
-        ),
-    )
 
     txt_nvidia_status = ft.Text(
         "NVIDIA API: detectada" if NVIDIA_API_KEY else "NVIDIA API: no configurada",
@@ -1138,111 +1173,6 @@ def main(page: ft.Page):
     imagen_count_inicial = str(ai_studio_config.get("imagen_count", 1))
     auto_send_inicial = ai_studio_config.get("auto_send_to_extension", False)
 
-    tile_config = ft.Card(
-        col={"md": 4},
-        content=ft.Container(
-            padding=20,
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.SETTINGS),
-                            ft.Text("CONFIGURACIÓN", weight="bold"),
-                        ]
-                    ),
-                    txt_proximo,
-                    ft.ElevatedButton(
-                        "Ruta de Proyectos",
-                        icon=ft.Icons.FOLDER_OPEN,
-                        on_click=lambda _: picker.get_directory_path(),
-                    ),
-                    ft.Divider(),
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.RECORD_VOICE_OVER, color=ft.Colors.BLUE_600),
-                            ft.Text("NVIDIA TTS", weight="bold"),
-                        ]
-                    ),
-                    txt_nvidia_status,
-                    switch_tts_enabled,
-                    txt_tts_language,
-                    txt_tts_voice,
-                    ft.Row([txt_tts_output, txt_tts_sample_rate]),
-                    ft.ElevatedButton(
-                        "Probar TTS en último script",
-                        icon=ft.Icons.GRAPHIC_EQ,
-                        on_click=probar_tts_ultimo_proyecto,
-                        bgcolor=ft.Colors.BLUE_700,
-                        color="white",
-                    ),
-                    ft.Text(
-                        "Usa una voz válida de Magpie Multilingual, por ejemplo Magpie-Multilingual.EN-US.Aria.",
-                        size=11,
-                        color=ft.Colors.GREY_600,
-                        italic=True,
-                    ),
-                    ft.Divider(),
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.TRANSCRIBE, color=ft.Colors.PURPLE_500),
-                            ft.Text("WHISPERX", weight="bold"),
-                        ]
-                    ),
-                    switch_whisperx_enabled,
-                    txt_whisperx_model,
-                    txt_whisperx_python,
-                    ft.ElevatedButton(
-                        "Guardar config WhisperX",
-                        icon=ft.Icons.SAVE,
-                        on_click=lambda e: persistir_whisperx_desde_ui(mostrar_snack=True),
-                        bgcolor=ft.Colors.PURPLE_600,
-                        color="white",
-                    ),
-                    ft.Divider(),
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.FAST_FORWARD, color=ft.Colors.ORANGE_700),
-                            ft.Text("ALCANCE DE PRUEBA", weight="bold"),
-                        ]
-                    ),
-                    dropdown_ejecutar_hasta,
-                    txt_alcance_selector,
-                    ft.ElevatedButton(
-                        "Guardar alcance de prueba",
-                        icon=ft.Icons.SAVE,
-                        on_click=lambda e: persistir_alcance_ejecucion(mostrar_snack=True),
-                        bgcolor=ft.Colors.ORANGE_700,
-                        color="white",
-                    ),
-                    ft.Divider(),
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.SMART_TOY, color=ft.Colors.BLUE_700),
-                            ft.Text("Google AI Studio (Post-WhisperX)", weight="bold"),
-                        ]
-                    ),
-                    txt_ai_studio_wait,
-                    txt_prompt_ai_studio,
-                    ft.Text(
-                        "Los prompts extraídos se guardarán en prompts_imagenes.txt, separados por una línea en blanco.",
-                        size=11,
-                        color=ft.Colors.GREY_600,
-                        italic=True,
-                    ),
-                    ft.ElevatedButton(
-                        "Guardar configuración AI Studio",
-                        icon=ft.Icons.SAVE,
-                        on_click=lambda e: persistir_ai_studio_desde_ui(mostrar_snack=True),
-                        bgcolor=ft.Colors.BLUE_700,
-                        color="white",
-                        width=1000,
-                        height=40,
-                    ),
-                ]
-            ),
-        ),
-    )
-
     txt_prompt_count = ft.Text(
         f"{len(prompts_lista)} prompts",
         size=12,
@@ -1257,47 +1187,6 @@ def main(page: ft.Page):
         ),
         height=450,
         border_radius=8,
-    )
-
-    tile_prompts = ft.Card(
-        col={"md": 12},
-        content=ft.Container(
-            padding=20,
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.AUTO_FIX_HIGH, color=ft.Colors.PURPLE_600),
-                            ft.Text(
-                                "PROMPT MANAGER", weight="bold", size=16, expand=True
-                            ),
-                            txt_prompt_count,
-                            ft.OutlinedButton(
-                                "Desactivar todos",
-                                icon=ft.Icons.TOGGLE_OFF,
-                                on_click=deshabilitar_todos_prompts,
-                            ),
-                            ft.OutlinedButton(
-                                "Activar todos",
-                                icon=ft.Icons.TOGGLE_ON,
-                                on_click=habilitar_todos_prompts,
-                            ),
-                            ft.ElevatedButton(
-                                "Agregar Prompt",
-                                icon=ft.Icons.ADD_CIRCLE_OUTLINE,
-                                on_click=agregar_prompt_nuevo,
-                                bgcolor=ft.Colors.PURPLE_600,
-                                color="white",
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    ft.Divider(),
-                    prompts_gallery_scroll,
-                ]
-            ),
-        ),
     )
 
     actualizar_selector_ejecucion()
@@ -1348,13 +1237,17 @@ def main(page: ft.Page):
         expand=True,
     )
 
-    lbl_imagen_status = ft.Text(
-        "Estado: esperando...",
-        size=11,
-        color=ft.Colors.GREY_500,
-        italic=True,
-    )
-    image_status_ref[0] = lbl_imagen_status
+    def crear_lbl_imagen_status():
+        control = ft.Text(
+            "Estado: esperando...",
+            size=11,
+            color=ft.Colors.GREY_500,
+            italic=True,
+        )
+        image_status_refs.append(control)
+        return control
+
+    lbl_imagen_status = crear_lbl_imagen_status()
 
     def persistir_imagen_config(e=None, mostrar_snack=False):
         ai_studio_config["auto_send_to_extension"] = bool(switch_auto_send.value)
@@ -1476,77 +1369,6 @@ def main(page: ft.Page):
         _actualizar_label_ref_images()
         page.update()
 
-    tile_imagen = ft.Card(
-        col={"md": 4},
-        content=ft.Container(
-            padding=20,
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.IMAGE, color=ft.Colors.TEAL_600),
-                            ft.Text("GENERACIÓN DE IMÁGENES", weight="bold"),
-                        ]
-                    ),
-                    ft.Divider(),
-                    switch_auto_send,
-                    ft.Row([dropdown_imagen_model, dropdown_imagen_count]),
-                    dropdown_imagen_aspect,
-                    ft.Divider(),
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.IMAGE_SEARCH, color=ft.Colors.TEAL_600, size=16),
-                            ft.Text("Imágenes de referencia (opcional)", size=12, weight="bold"),
-                        ]
-                    ),
-                    dropdown_ref_mode,
-                    ft.Row(
-                        [
-                            ft.ElevatedButton(
-                                "Seleccionar imágenes",
-                                icon=ft.Icons.ADD_PHOTO_ALTERNATE,
-                                on_click=lambda _: ref_images_picker.pick_files(
-                                    allow_multiple=True,
-                                    allowed_extensions=["png", "jpg", "jpeg", "webp"],
-                                ),
-                                expand=True,
-                                bgcolor=ft.Colors.TEAL_50,
-                                color=ft.Colors.TEAL_800,
-                            ),
-                            ft.IconButton(
-                                ft.Icons.CLEAR,
-                                on_click=limpiar_ref_images,
-                                tooltip="Limpiar selección",
-                                icon_color=ft.Colors.RED_400,
-                            ),
-                        ]
-                    ),
-                    lbl_ref_images,
-                    ft.Divider(),
-                    lbl_imagen_status,
-                    ft.Row(
-                        [
-                            ft.ElevatedButton(
-                                "Enviar Prompts",
-                                icon=ft.Icons.SEND,
-                                on_click=enviar_prompts_manualmente,
-                                expand=True,
-                                bgcolor=ft.Colors.TEAL_700,
-                                color="white",
-                            ),
-                            ft.IconButton(
-                                ft.Icons.INFO_OUTLINE,
-                                on_click=solicitar_estado_cola,
-                                tooltip="Ver estado de la cola",
-                                icon_color=ft.Colors.TEAL_700,
-                                bgcolor=ft.Colors.TEAL_50,
-                            ),
-                        ]
-                    ),
-                ]
-            ),
-        ),
-    )
 
     # ==========================================
     # --- UI: CONTROL DE EXTENSIÓN WEB ---
@@ -1684,50 +1506,6 @@ def main(page: ft.Page):
         else:
             show_snack("La extensión no está conectada", ft.Colors.RED)
 
-    tile_web_extension = ft.Card(
-        col={"md": 4},
-        content=ft.Container(
-            padding=20,
-            content=ft.Column([
-                    ft.Row([
-                            ft.Icon(ft.Icons.LANGUAGE, color=ft.Colors.BLUE_500),
-                            ft.Text("EXTENSIÓN WEB (CHROME)", weight="bold"),
-                        ]
-                    ),
-                    ft.Row([
-                        dropdown_journeys,
-                        ft.IconButton(
-                            ft.Icons.REFRESH,
-                            on_click=solicitar_journeys,
-                            tooltip="Recargar lista de Journeys",
-                            icon_color=ft.Colors.BLUE_700
-                        )
-                    ]),
-                    chk_segundo_journey,
-                    dropdown_second_journey,
-                    chk_pegar_script,
-                    ft.Row([
-                        ft.ElevatedButton(
-                            "Ejecutar Journey",
-                            icon=ft.Icons.PLAY_ARROW,
-                            on_click=ordenar_ejecucion_journey,
-                            expand=True,
-                            bgcolor=ft.Colors.BLUE_800,
-                            color="white",
-                        ),
-                        ft.IconButton(
-                            ft.Icons.PASTE,
-                            tooltip="Pegar script.txt ahora (Paso Manual)",
-                            on_click=pegar_script_ahora,
-                            icon_color=ft.Colors.BLUE_800,
-                            bgcolor=ft.Colors.BLUE_50
-                        )
-                    ])
-                ]
-            ),
-        ),
-    )
-
     def on_pick_directory(e):
         if not e.path:
             return
@@ -1741,15 +1519,468 @@ def main(page: ft.Page):
     page.overlay.append(picker)
     page.overlay.append(ref_images_picker)
 
-    page.add(
-        ft.Row([
-                ft.Text("Clusiv", size=32, weight="bold", color=ft.Colors.BLUE_800),
-                ft.Text("Automation", size=32),
+    tracker_widget, set_fase_estado, reset_tracker = construir_tracker_fases(page)
+    lbl_imagen_status_sidebar = crear_lbl_imagen_status()
+
+    icono_ext_status = ft.Icon(ft.Icons.CIRCLE, size=10, color=ft.Colors.ORANGE_400)
+    lbl_ext_status = ft.Text(
+        "Extensión: desconectada",
+        size=11,
+        color=ft.Colors.ORANGE_700,
+    )
+
+    def actualizar_ext_status_header(conectada, version=""):
+        version_label = f" v{version}" if version else ""
+        if conectada:
+            lbl_ext_status.value = f"Extensión: conectada{version_label}"
+            lbl_ext_status.color = ft.Colors.GREEN_700
+            icono_ext_status.color = ft.Colors.GREEN_500
+        else:
+            lbl_ext_status.value = "Extensión: desconectada"
+            lbl_ext_status.color = ft.Colors.ORANGE_700
+            icono_ext_status.color = ft.Colors.ORANGE_400
+        if page.controls:
+            page.update()
+
+    ws_bridge.ui_ext_status_cb = actualizar_ext_status_header
+
+    header_bar = ft.Container(
+        content=ft.Row(
+            [
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.AUTO_AWESOME, color=ft.Colors.BLUE_700, size=22),
+                        ft.Text("Clusiv", size=20, weight="bold", color=ft.Colors.BLUE_800),
+                        ft.Text("Automation", size=20),
+                    ],
+                    spacing=6,
+                ),
+                ft.Row([icono_ext_status, lbl_ext_status], spacing=4),
             ],
-            alignment=ft.MainAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         ),
-        ft.ResponsiveRow([tile_gestion, tile_flujo, tile_config, tile_web_extension, tile_imagen]),
-        ft.ResponsiveRow([tile_prompts]),
+        padding=ft.padding.symmetric(horizontal=20, vertical=10),
+        bgcolor=ft.Colors.WHITE,
+        border=ft.border.only(bottom=ft.BorderSide(1, ft.Colors.GREY_200)),
+        shadow=ft.BoxShadow(
+            blur_radius=4,
+            color=ft.Colors.with_opacity(0.06, ft.Colors.BLACK),
+            offset=ft.Offset(0, 2),
+        ),
+    )
+
+    expansion_proyecto = ft.ExpansionTile(
+        title=ft.Text("📁 Proyecto & Canales YouTube", weight="bold", size=13),
+        subtitle=ft.Text(
+            "Fuente de referencia y carpeta de salida",
+            size=11,
+            color=ft.Colors.GREY_600,
+        ),
+        initially_expanded=True,
+        controls=[
+            ft.ElevatedButton(
+                "Ruta de Proyectos",
+                icon=ft.Icons.FOLDER_OPEN,
+                on_click=lambda _: picker.get_directory_path(),
+            ),
+            ft.Divider(),
+            ft.Text(
+                "Canales de referencia",
+                size=12,
+                weight="bold",
+                color=ft.Colors.GREY_700,
+            ),
+            ft.Row([input_id, input_name]),
+            ft.ElevatedButton(
+                "Agregar Canal",
+                icon=ft.Icons.ADD,
+                on_click=agregar_canal,
+                width=1000,
+                bgcolor=ft.Colors.BLUE_800,
+                color="white",
+            ),
+            ft.Divider(),
+            lista_canales_ui,
+        ],
+    )
+
+    expansion_prompts = ft.ExpansionTile(
+        title=ft.Text("💬 Prompts -> ChatGPT", weight="bold", size=13),
+        subtitle=ft.Text(
+            "Generación de títulos, investigación y scripts",
+            size=11,
+            color=ft.Colors.GREY_600,
+        ),
+        initially_expanded=False,
+        controls=[
+            ft.Row(
+                [
+                    txt_prompt_count,
+                    ft.OutlinedButton(
+                        "Desactivar todos",
+                        icon=ft.Icons.TOGGLE_OFF,
+                        on_click=deshabilitar_todos_prompts,
+                    ),
+                    ft.OutlinedButton(
+                        "Activar todos",
+                        icon=ft.Icons.TOGGLE_ON,
+                        on_click=habilitar_todos_prompts,
+                    ),
+                    ft.ElevatedButton(
+                        "Agregar Prompt",
+                        icon=ft.Icons.ADD_CIRCLE_OUTLINE,
+                        on_click=agregar_prompt_nuevo,
+                        bgcolor=ft.Colors.PURPLE_600,
+                        color="white",
+                    ),
+                ],
+                wrap=True,
+            ),
+            ft.Divider(),
+            prompts_gallery_scroll,
+            ft.Divider(),
+            ft.Row(
+                [
+                    ft.Icon(ft.Icons.FAST_FORWARD, color=ft.Colors.ORANGE_700, size=16),
+                    ft.Text("Alcance de prueba", size=12, weight="bold"),
+                ]
+            ),
+            dropdown_ejecutar_hasta,
+            txt_alcance_selector,
+            ft.ElevatedButton(
+                "Guardar alcance",
+                icon=ft.Icons.SAVE,
+                on_click=lambda e: persistir_alcance_ejecucion(mostrar_snack=True),
+                bgcolor=ft.Colors.ORANGE_700,
+                color="white",
+            ),
+        ],
+    )
+
+    expansion_tts = ft.ExpansionTile(
+        title=ft.Text("🔊 Síntesis de Voz - NVIDIA TTS", weight="bold", size=13),
+        subtitle=ft.Text(
+            "Genera audio.wav desde script.txt (Fase 3)",
+            size=11,
+            color=ft.Colors.GREY_600,
+        ),
+        initially_expanded=False,
+        controls=[
+            txt_nvidia_status,
+            switch_tts_enabled,
+            txt_tts_language,
+            txt_tts_voice,
+            ft.Row([txt_tts_output, txt_tts_sample_rate]),
+            ft.ElevatedButton(
+                "Probar TTS en último script",
+                icon=ft.Icons.GRAPHIC_EQ,
+                on_click=probar_tts_ultimo_proyecto,
+                bgcolor=ft.Colors.BLUE_700,
+                color="white",
+            ),
+            ft.Text(
+                "Voz válida: Magpie-Multilingual.EN-US.Aria",
+                size=11,
+                color=ft.Colors.GREY_600,
+                italic=True,
+            ),
+        ],
+    )
+
+    expansion_whisperx = ft.ExpansionTile(
+        title=ft.Text("🎙️ Transcripción - WhisperX", weight="bold", size=13),
+        subtitle=ft.Text(
+            "Timestamps por palabra para sincronización (Fase 4)",
+            size=11,
+            color=ft.Colors.GREY_600,
+        ),
+        initially_expanded=False,
+        controls=[
+            switch_whisperx_enabled,
+            txt_whisperx_model,
+            txt_whisperx_python,
+            ft.ElevatedButton(
+                "Guardar config WhisperX",
+                icon=ft.Icons.SAVE,
+                on_click=lambda e: persistir_whisperx_desde_ui(mostrar_snack=True),
+                bgcolor=ft.Colors.PURPLE_600,
+                color="white",
+            ),
+        ],
+    )
+
+    expansion_ai_studio = ft.ExpansionTile(
+        title=ft.Text("🤖 Prompts de Imagen - AI Studio", weight="bold", size=13),
+        subtitle=ft.Text(
+            "Analiza script.txt y genera prompts visuales (Fase 5)",
+            size=11,
+            color=ft.Colors.GREY_600,
+        ),
+        initially_expanded=False,
+        controls=[
+            txt_ai_studio_wait,
+            txt_prompt_ai_studio,
+            ft.Text(
+                "Los prompts extraídos se guardarán en prompts_imagenes.txt.",
+                size=11,
+                color=ft.Colors.GREY_600,
+                italic=True,
+            ),
+            ft.ElevatedButton(
+                "Guardar configuración AI Studio",
+                icon=ft.Icons.SAVE,
+                on_click=lambda e: persistir_ai_studio_desde_ui(mostrar_snack=True),
+                bgcolor=ft.Colors.BLUE_700,
+                color="white",
+                width=1000,
+                height=40,
+            ),
+        ],
+    )
+
+    expansion_flow = ft.ExpansionTile(
+        title=ft.Text("🖼️ Generación de Imágenes - Google Flow", weight="bold", size=13),
+        subtitle=ft.Text(
+            "Extensión Chrome + Flow Automator (Fase 6)",
+            size=11,
+            color=ft.Colors.GREY_600,
+        ),
+        initially_expanded=False,
+        controls=[
+            ft.Text(
+                "Configuración de generación",
+                size=12,
+                weight="bold",
+                color=ft.Colors.GREY_700,
+            ),
+            switch_auto_send,
+            ft.Row([dropdown_imagen_model, dropdown_imagen_count]),
+            dropdown_imagen_aspect,
+            ft.Divider(),
+            ft.Row(
+                [
+                    ft.Icon(ft.Icons.IMAGE_SEARCH, color=ft.Colors.TEAL_600, size=16),
+                    ft.Text("Imágenes de referencia (opcional)", size=12, weight="bold"),
+                ]
+            ),
+            dropdown_ref_mode,
+            ft.Row(
+                [
+                    ft.ElevatedButton(
+                        "Seleccionar imágenes",
+                        icon=ft.Icons.ADD_PHOTO_ALTERNATE,
+                        on_click=lambda _: ref_images_picker.pick_files(
+                            allow_multiple=True,
+                            allowed_extensions=["png", "jpg", "jpeg", "webp"],
+                        ),
+                        expand=True,
+                        bgcolor=ft.Colors.TEAL_50,
+                        color=ft.Colors.TEAL_800,
+                    ),
+                    ft.IconButton(
+                        ft.Icons.CLEAR,
+                        on_click=limpiar_ref_images,
+                        tooltip="Limpiar selección",
+                        icon_color=ft.Colors.RED_400,
+                    ),
+                ]
+            ),
+            lbl_ref_images,
+            ft.Divider(),
+            lbl_imagen_status,
+            ft.Row(
+                [
+                    ft.ElevatedButton(
+                        "Enviar Prompts",
+                        icon=ft.Icons.SEND,
+                        on_click=enviar_prompts_manualmente,
+                        expand=True,
+                        bgcolor=ft.Colors.TEAL_700,
+                        color="white",
+                    ),
+                    ft.IconButton(
+                        ft.Icons.INFO_OUTLINE,
+                        on_click=solicitar_estado_cola,
+                        tooltip="Ver estado de la cola",
+                        icon_color=ft.Colors.TEAL_700,
+                        bgcolor=ft.Colors.TEAL_50,
+                    ),
+                ]
+            ),
+            ft.Divider(),
+            ft.Row(
+                [
+                    ft.Icon(ft.Icons.LANGUAGE, color=ft.Colors.BLUE_500, size=16),
+                    ft.Text("Automatización por Journey (Chrome)", size=12, weight="bold"),
+                ]
+            ),
+            ft.Row(
+                [
+                    dropdown_journeys,
+                    ft.IconButton(
+                        ft.Icons.REFRESH,
+                        on_click=solicitar_journeys,
+                        tooltip="Recargar lista de Journeys",
+                        icon_color=ft.Colors.BLUE_700,
+                    ),
+                ]
+            ),
+            chk_segundo_journey,
+            dropdown_second_journey,
+            chk_pegar_script,
+            ft.Row(
+                [
+                    ft.ElevatedButton(
+                        "Ejecutar Journey",
+                        icon=ft.Icons.PLAY_ARROW,
+                        on_click=ordenar_ejecucion_journey,
+                        expand=True,
+                        bgcolor=ft.Colors.BLUE_800,
+                        color="white",
+                    ),
+                    ft.IconButton(
+                        ft.Icons.PASTE,
+                        tooltip="Pegar script.txt ahora (Paso Manual)",
+                        on_click=pegar_script_ahora,
+                        icon_color=ft.Colors.BLUE_800,
+                        bgcolor=ft.Colors.BLUE_50,
+                    ),
+                ]
+            ),
+        ],
+    )
+
+    def limpiar_log(e=None):
+        log_ui.controls.clear()
+        page.update()
+
+    btn_limpiar_log = ft.TextButton(
+        "Limpiar",
+        icon=ft.Icons.DELETE_SWEEP,
+        icon_color=ft.Colors.GREY_500,
+        on_click=limpiar_log,
+        style=ft.ButtonStyle(color=ft.Colors.GREY_500),
+    )
+
+    col_izquierda = ft.Container(
+        width=420,
+        padding=ft.padding.only(left=16, top=16, right=8, bottom=16),
+        content=ft.Column(
+            [
+                ft.Text(
+                    "Configuración del Pipeline",
+                    size=12,
+                    weight="bold",
+                    color=ft.Colors.GREY_500,
+                    italic=True,
+                ),
+                expansion_proyecto,
+                expansion_prompts,
+                expansion_tts,
+                expansion_whisperx,
+                expansion_ai_studio,
+                expansion_flow,
+            ],
+            spacing=4,
+            scroll=ft.ScrollMode.AUTO,
+        ),
+    )
+
+    col_central = ft.Container(
+        width=320,
+        padding=ft.padding.symmetric(horizontal=8, vertical=16),
+        content=ft.Column(
+            [
+                ft.Text(
+                    "Pipeline de Ejecución",
+                    size=12,
+                    weight="bold",
+                    color=ft.Colors.GREY_500,
+                    italic=True,
+                ),
+                ft.Divider(),
+                txt_proximo,
+                ft.Divider(),
+                btn_ejecutar_widget,
+                txt_alcance_flujo,
+                btn_detener,
+                prg,
+                ft.Divider(),
+                ft.Text(
+                    "Estado del flujo",
+                    size=12,
+                    weight="bold",
+                    color=ft.Colors.GREY_500,
+                ),
+                tracker_widget,
+            ],
+            spacing=10,
+            scroll=ft.ScrollMode.AUTO,
+        ),
+    )
+
+    col_derecha = ft.Container(
+        expand=True,
+        padding=ft.padding.only(left=8, top=16, right=16, bottom=16),
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Row(
+                            [
+                                ft.Icon(ft.Icons.TERMINAL, color=ft.Colors.GREY_500, size=16),
+                                ft.Text(
+                                    "Consola de ejecución",
+                                    size=12,
+                                    weight="bold",
+                                    color=ft.Colors.GREY_500,
+                                ),
+                            ],
+                            spacing=6,
+                        ),
+                        btn_limpiar_log,
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                log_container,
+                ft.Divider(),
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.IMAGE_OUTLINED, color=ft.Colors.GREY_500, size=14),
+                        ft.Text("Estado de imágenes", size=11, color=ft.Colors.GREY_500),
+                    ],
+                    spacing=4,
+                ),
+                lbl_imagen_status_sidebar,
+            ],
+            spacing=8,
+            expand=True,
+        ),
+    )
+
+    if ruta_base[0]:
+        txt_proximo.value = f"Próximo Proyecto: video {obtener_siguiente_num(ruta_base[0])}"
+
+    actualizar_ext_status_header(
+        bool(ws_bridge.extension_bridge_state.get("connected")),
+        ws_bridge.extension_bridge_state.get("version") or "",
+    )
+    reset_tracker()
+
+    page.add(
+        header_bar,
+        ft.Row(
+            [
+                col_izquierda,
+                ft.Container(width=1, bgcolor=ft.Colors.GREY_200, margin=ft.margin.symmetric(vertical=16)),
+                col_central,
+                ft.Container(width=1, bgcolor=ft.Colors.GREY_200, margin=ft.margin.symmetric(vertical=16)),
+                col_derecha,
+            ],
+            expand=True,
+            spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        ),
     )
     refrescar_canales()
     refrescar_prompts()
