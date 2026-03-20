@@ -39,5 +39,9 @@ Thumbs.db
 # Logs
 *.log
 
+# Environment files
+.env
+.env.*
+
 # Config sensible (descomentar si contiene credenciales)
 # config_automatizacion.json
