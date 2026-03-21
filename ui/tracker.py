@@ -1,99 +1,98 @@
-import flet as ft
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+
+FASES = [
+    ("youtube", "📺", "Análisis YouTube"),
+    ("chatgpt", "💬", "ChatGPT - Prompts"),
+    ("texto", "📄", "Post-proceso texto"),
+    ("tts", "🔊", "Síntesis TTS"),
+    ("whisperx", "🎙️", "Transcripción"),
+    ("aistudio", "🤖", "Prompts de imagen"),
+    ("flow", "🖼️", "Generación imágenes"),
+]
+
+_ESTILOS = {
+    "pending": ("background:#F7FAFC; border:1px solid #E2E8F0; border-radius:8px;", "#A0AEC0", "○"),
+    "running": ("background:#EBF8FF; border:1px solid #90CDF4; border-radius:8px;", "#2B6CB0", "↻"),
+    "done": ("background:#F0FFF4; border:1px solid #9AE6B4; border-radius:8px;", "#276749", "✓"),
+    "error": ("background:#FFF5F5; border:1px solid #FEB2B2; border-radius:8px;", "#C53030", "✗"),
+    "skipped": ("background:#FFFBEB; border:1px solid #FAF089; border-radius:8px;", "#975A16", "⏭"),
+}
 
 
-def construir_tracker_fases(page):
-    fases = [
-        ("youtube", "📺", "Análisis YouTube"),
-        ("chatgpt", "💬", "ChatGPT - Prompts"),
-        ("texto", "📄", "Post-proceso texto"),
-        ("tts", "🔊", "Síntesis TTS"),
-        ("whisperx", "🎙️", "Transcripción"),
-        ("aistudio", "🤖", "Prompts de imagen"),
-        ("flow", "🖼️", "Generación imágenes"),
-    ]
-    color_map = {
-        "pending": ft.Colors.GREY_400,
-        "running": ft.Colors.BLUE_500,
-        "done": ft.Colors.GREEN_600,
-        "error": ft.Colors.RED_500,
-        "skipped": ft.Colors.AMBER_500,
-    }
-    icon_map = {
-        "pending": ft.Icons.RADIO_BUTTON_UNCHECKED,
-        "running": ft.Icons.SYNC,
-        "done": ft.Icons.CHECK_CIRCLE_OUTLINE,
-        "error": ft.Icons.ERROR_OUTLINE,
-        "skipped": ft.Icons.SKIP_NEXT,
-    }
+def construir_tracker_fases(_page=None):
+    """
+    Construye el tracker visual de fases del pipeline.
+
+    Parametros
+    ----------
+    _page : ignorado - se mantiene para compatibilidad con la firma Flet.
+
+    Retorna
+    -------
+    (widget: QWidget, set_fase_estado: callable, reset_tracker: callable)
+    """
+    container = QWidget()
+    vbox = QVBoxLayout(container)
+    vbox.setContentsMargins(0, 0, 0, 0)
+    vbox.setSpacing(4)
 
     controles = {}
-    filas = []
 
-    for fase_id, icono, nombre in fases:
-        indicador = ft.Icon(
-            ft.Icons.RADIO_BUTTON_UNCHECKED,
-            color=ft.Colors.GREY_400,
-            size=16,
-        )
-        lbl_detalle = ft.Text("-", size=10, color=ft.Colors.GREY_400, italic=True)
-        fila = ft.Container(
-            content=ft.Row(
-                [
-                    indicador,
-                    ft.Column(
-                        [
-                            ft.Text(f"{icono}  {nombre}", size=12, weight="bold"),
-                            lbl_detalle,
-                        ],
-                        spacing=1,
-                        tight=True,
-                    ),
-                ],
-                spacing=10,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            padding=ft.padding.symmetric(horizontal=10, vertical=6),
-            border_radius=8,
-            bgcolor=ft.Colors.GREY_50,
-            border=ft.border.all(1, ft.Colors.GREY_200),
-        )
-        controles[fase_id] = {"icono": indicador, "label": lbl_detalle, "row": fila}
-        filas.append(fila)
+    for fase_id, icono, nombre in FASES:
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.NoFrame)
+        frame.setStyleSheet(_ESTILOS["pending"][0])
 
-    def set_fase_estado(fase_id, estado, detalle="", refresh=True):
-        control = controles.get(fase_id)
-        if not control:
+        hbox = QHBoxLayout(frame)
+        hbox.setContentsMargins(10, 6, 10, 6)
+        hbox.setSpacing(10)
+
+        lbl_indicador = QLabel("○")
+        lbl_indicador.setFixedWidth(16)
+        lbl_indicador.setStyleSheet("color: #A0AEC0; font-size: 14px;")
+        lbl_indicador.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        col_texto = QWidget()
+        vbox_texto = QVBoxLayout(col_texto)
+        vbox_texto.setContentsMargins(0, 0, 0, 0)
+        vbox_texto.setSpacing(1)
+
+        lbl_nombre = QLabel(f"{icono}  {nombre}")
+        lbl_nombre.setStyleSheet("font-weight: bold; font-size: 12px; color: #2D3748;")
+
+        lbl_detalle = QLabel("-")
+        lbl_detalle.setStyleSheet("font-size: 10px; color: #A0AEC0; font-style: italic;")
+
+        vbox_texto.addWidget(lbl_nombre)
+        vbox_texto.addWidget(lbl_detalle)
+
+        hbox.addWidget(lbl_indicador)
+        hbox.addWidget(col_texto, stretch=1)
+
+        controles[fase_id] = {
+            "frame": frame,
+            "indicador": lbl_indicador,
+            "detalle": lbl_detalle,
+        }
+        vbox.addWidget(frame)
+
+    def set_fase_estado(fase_id: str, estado: str, detalle: str = "", refresh: bool = True):
+        ctrl = controles.get(fase_id)
+        if ctrl is None:
             return
 
-        color = color_map.get(estado, ft.Colors.GREY_400)
-        control["icono"].name = icon_map.get(estado, ft.Icons.RADIO_BUTTON_UNCHECKED)
-        control["icono"].color = color
-        control["label"].value = detalle or estado
-        control["label"].color = color
-
-        if estado == "running":
-            control["row"].bgcolor = "#EBF8FF"
-            control["row"].border = ft.border.all(1, ft.Colors.BLUE_300)
-        elif estado == "done":
-            control["row"].bgcolor = "#F0FFF4"
-            control["row"].border = ft.border.all(1, ft.Colors.GREEN_300)
-        elif estado == "error":
-            control["row"].bgcolor = "#FFF5F5"
-            control["row"].border = ft.border.all(1, ft.Colors.RED_200)
-        elif estado == "skipped":
-            control["row"].bgcolor = "#FFFBEB"
-            control["row"].border = ft.border.all(1, ft.Colors.AMBER_200)
-        else:
-            control["row"].bgcolor = ft.Colors.GREY_50
-            control["row"].border = ft.border.all(1, ft.Colors.GREY_200)
-
-        if refresh and page.controls:
-            page.update()
+        estilo_frame, color_texto, emoji = _ESTILOS.get(estado, _ESTILOS["pending"])
+        ctrl["frame"].setStyleSheet(estilo_frame)
+        ctrl["indicador"].setText(emoji)
+        ctrl["indicador"].setStyleSheet(f"color: {color_texto}; font-size: 14px;")
+        ctrl["detalle"].setText(detalle or estado)
+        ctrl["detalle"].setStyleSheet(
+            f"font-size: 10px; color: {color_texto}; font-style: italic;"
+        )
 
     def reset_tracker():
-        for fase_id, _, _ in fases:
-            set_fase_estado(fase_id, "pending", "-", refresh=False)
-        if page.controls:
-            page.update()
+        for fase_id, _, _ in FASES:
+            set_fase_estado(fase_id, "pending", "-")
 
-    return ft.Column(filas, spacing=4), set_fase_estado, reset_tracker
+    return container, set_fase_estado, reset_tracker

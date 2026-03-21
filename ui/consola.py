@@ -1,106 +1,104 @@
 from datetime import datetime
 
-import flet as ft
+from PyQt6.QtGui import QTextCursor
+from PyQt6.QtWidgets import QTextEdit, QVBoxLayout, QWidget
+
+FLET_COLOR_MAP = {
+    "red": "#E53E3E",
+    "red700": "#C53030",
+    "red_700": "#C53030",
+    "green700": "#276749",
+    "green_700": "#276749",
+    "green800": "#22543D",
+    "green_800": "#22543D",
+    "orange": "#DD6B20",
+    "orange700": "#C05621",
+    "orange_700": "#C05621",
+    "orange800": "#9C4221",
+    "orange_800": "#9C4221",
+    "blue": "#3182CE",
+    "blue800": "#2C5282",
+    "blue_800": "#2C5282",
+    "amber800": "#975A16",
+    "amber_800": "#975A16",
+}
+_DEFAULT_COLOR = "#2D3748"
+_MAX_MESSAGES = 150
 
 
-def build_consola(page):
-    log_ui = ft.Column(
-        spacing=6,
-        scroll=ft.ScrollMode.AUTO,
-        auto_scroll=True,
+def _color_hex(color) -> str:
+    """Convierte un valor ft.Colors (string) o None a un color hex CSS."""
+    if color is None:
+        return _DEFAULT_COLOR
+    key = str(color).lower().replace(" ", "")
+    return FLET_COLOR_MAP.get(key, _DEFAULT_COLOR)
+
+
+def build_consola(_page=None):
+    """
+    Construye la consola de logs.
+
+    Parametros
+    ----------
+    _page : ignorado - se mantiene para compatibilidad con la firma Flet
+            mientras ui_main.py no se actualice.
+
+    Retorna
+    -------
+    (widget: QWidget, log_msg: callable, limpiar_log: callable)
+    """
+    widget = QWidget()
+    layout = QVBoxLayout(widget)
+    layout.setContentsMargins(0, 0, 0, 0)
+
+    log_area = QTextEdit()
+    log_area.setReadOnly(True)
+    log_area.setStyleSheet(
+        "QTextEdit {"
+        "  background: #F8F9FA;"
+        "  font-family: Consolas, 'Courier New', monospace;"
+        "  font-size: 12px;"
+        "  border: 1px solid #CBD5E0;"
+        "  border-radius: 8px;"
+        "  padding: 8px;"
+        "}"
     )
-    log_container = ft.Container(
-        content=log_ui,
-        expand=True,
-        border_radius=10,
-        bgcolor="#F8F9FA",
-        border=ft.border.all(1, ft.Colors.GREY_300),
-        padding=ft.padding.all(10),
-    )
+    layout.addWidget(log_area)
+
+    count = [0]
 
     def log_msg(texto, color=None, weight=None, italic=False, is_divider=False):
-        """Agrega un mensaje estilo chat-bubble al log con timestamp y auto-scroll."""
         if is_divider:
-            log_ui.controls.append(
-                ft.Container(
-                    content=ft.Divider(height=1, color=ft.Colors.GREY_300),
-                    padding=ft.padding.symmetric(vertical=4),
-                )
+            log_area.append(
+                '<hr style="border:none; border-top:1px solid #E2E8F0; margin:4px 0"/>'
             )
-            page.update()
             return
 
         timestamp = datetime.now().strftime("%H:%M:%S")
+        color_hex = _color_hex(color)
+        font_weight = "bold" if weight in ("bold", "w700", "w800", "w900") else "normal"
+        font_style = "italic" if italic else "normal"
 
-        if color == ft.Colors.RED or color == ft.Colors.RED_700:
-            bubble_bg = "#FFF5F5"
-            border_color = ft.Colors.RED_200
-        elif color == ft.Colors.GREEN_700 or color == ft.Colors.GREEN_800:
-            bubble_bg = "#F0FFF4"
-            border_color = ft.Colors.GREEN_200
-        elif (
-            color == ft.Colors.ORANGE
-            or color == ft.Colors.ORANGE_700
-            or color == ft.Colors.ORANGE_800
-        ):
-            bubble_bg = "#FFFAF0"
-            border_color = ft.Colors.ORANGE_200
-        elif color == ft.Colors.BLUE or color == ft.Colors.BLUE_800:
-            bubble_bg = "#EBF8FF"
-            border_color = ft.Colors.BLUE_200
-        elif color == ft.Colors.AMBER_800:
-            bubble_bg = "#FFFBEB"
-            border_color = ft.Colors.AMBER_200
-        else:
-            bubble_bg = ft.Colors.WHITE
-            border_color = ft.Colors.GREY_200
-
-        bubble = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Text(
-                        timestamp,
-                        size=9,
-                        color=ft.Colors.GREY_400,
-                        italic=True,
-                        no_wrap=True,
-                    ),
-                    ft.Text(
-                        texto,
-                        size=12,
-                        color=color,
-                        weight=weight,
-                        italic=italic,
-                        expand=True,
-                        selectable=True,
-                    ),
-                ],
-                spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.START,
-            ),
-            padding=ft.padding.symmetric(horizontal=12, vertical=8),
-            border_radius=10,
-            bgcolor=bubble_bg,
-            border=ft.border.all(1, border_color),
-            shadow=ft.BoxShadow(
-                spread_radius=0,
-                blur_radius=2,
-                color=ft.Colors.with_opacity(0.04, ft.Colors.BLACK),
-                offset=ft.Offset(0, 1),
-            ),
-            animate_opacity=ft.Animation(300, ft.AnimationCurve.EASE_IN),
+        html = (
+            f'<span style="color:#A0AEC0; font-size:10px;">[{timestamp}]</span> '
+            f'<span style="color:{color_hex}; font-weight:{font_weight}; font-style:{font_style};">'
+            f"{texto}</span>"
         )
+        log_area.append(html)
+        count[0] += 1
 
-        log_ui.controls.append(bubble)
+        if count[0] > _MAX_MESSAGES:
+            cursor = QTextCursor(log_area.document())
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
+            count[0] -= 1
 
-        MAX_LOG_MESSAGES = 150
-        if len(log_ui.controls) > MAX_LOG_MESSAGES:
-            log_ui.controls = log_ui.controls[-MAX_LOG_MESSAGES:]
-
-        page.update()
+        log_area.moveCursor(QTextCursor.MoveOperation.End)
 
     def limpiar_log(e=None):
-        log_ui.controls.clear()
-        page.update()
+        log_area.clear()
+        count[0] = 0
 
-    return log_container, log_msg, limpiar_log
+    return widget, log_msg, limpiar_log

@@ -1,50 +1,80 @@
-import flet as ft
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 
-def build_header(page):
-    icono_ext_status = ft.Icon(ft.Icons.CIRCLE, size=10, color=ft.Colors.ORANGE_400)
-    lbl_ext_status = ft.Text(
-        "Extensión: desconectada",
-        size=11,
-        color=ft.Colors.ORANGE_700,
+def build_header(_page=None):
+    """
+    Construye la barra de cabecera con titulo y estado de la extension Chrome.
+
+    Parametros
+    ----------
+    _page : ignorado - se mantiene para compatibilidad con la firma Flet.
+
+    Retorna
+    -------
+    (widget: QWidget, actualizar_ext_status_header: callable)
+    """
+    widget = QWidget()
+    widget.setFixedHeight(50)
+    widget.setStyleSheet(
+        "QWidget {"
+        "  background: white;"
+        "  border-bottom: 1px solid #E2E8F0;"
+        "}"
     )
 
-    def actualizar_ext_status_header(conectada, version=""):
+    hbox = QHBoxLayout(widget)
+    hbox.setContentsMargins(20, 0, 20, 0)
+    hbox.setSpacing(0)
+
+    logo_group = QWidget()
+    logo_layout = QHBoxLayout(logo_group)
+    logo_layout.setContentsMargins(0, 0, 0, 0)
+    logo_layout.setSpacing(6)
+
+    lbl_icon = QLabel("✨")
+    lbl_icon.setStyleSheet("font-size: 20px;")
+
+    lbl_clusiv = QLabel("Clusiv")
+    lbl_clusiv.setStyleSheet("font-size: 20px; font-weight: bold; color: #2C5282;")
+
+    lbl_auto = QLabel("Automation")
+    lbl_auto.setStyleSheet("font-size: 20px; color: #2D3748;")
+
+    logo_layout.addWidget(lbl_icon)
+    logo_layout.addWidget(lbl_clusiv)
+    logo_layout.addWidget(lbl_auto)
+
+    status_group = QWidget()
+    status_layout = QHBoxLayout(status_group)
+    status_layout.setContentsMargins(0, 0, 0, 0)
+    status_layout.setSpacing(6)
+
+    lbl_punto = QLabel("●")
+    lbl_punto.setStyleSheet("color: #DD6B20; font-size: 10px;")
+
+    lbl_estado = QLabel("Extensión: desconectada")
+    lbl_estado.setStyleSheet("font-size: 11px; color: #C05621;")
+
+    status_layout.addWidget(lbl_punto)
+    status_layout.addWidget(lbl_estado)
+
+    hbox.addWidget(logo_group)
+    hbox.addStretch()
+    hbox.addWidget(status_group)
+
+    def _actualizar_en_hilo_principal(conectada: bool, version: str):
         version_label = f" v{version}" if version else ""
         if conectada:
-            lbl_ext_status.value = f"Extensión: conectada{version_label}"
-            lbl_ext_status.color = ft.Colors.GREEN_700
-            icono_ext_status.color = ft.Colors.GREEN_500
+            lbl_punto.setStyleSheet("color: #38A169; font-size: 10px;")
+            lbl_estado.setStyleSheet("font-size: 11px; color: #276749;")
+            lbl_estado.setText(f"Extensión: conectada{version_label}")
         else:
-            lbl_ext_status.value = "Extensión: desconectada"
-            lbl_ext_status.color = ft.Colors.ORANGE_700
-            icono_ext_status.color = ft.Colors.ORANGE_400
-        if page.controls:
-            page.update()
+            lbl_punto.setStyleSheet("color: #DD6B20; font-size: 10px;")
+            lbl_estado.setStyleSheet("font-size: 11px; color: #C05621;")
+            lbl_estado.setText("Extensión: desconectada")
 
-    header_bar = ft.Container(
-        content=ft.Row(
-            [
-                ft.Row(
-                    [
-                        ft.Icon(ft.Icons.AUTO_AWESOME, color=ft.Colors.BLUE_700, size=22),
-                        ft.Text("Clusiv", size=20, weight="bold", color=ft.Colors.BLUE_800),
-                        ft.Text("Automation", size=20),
-                    ],
-                    spacing=6,
-                ),
-                ft.Row([icono_ext_status, lbl_ext_status], spacing=4),
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-        ),
-        padding=ft.padding.symmetric(horizontal=20, vertical=10),
-        bgcolor=ft.Colors.WHITE,
-        border=ft.border.only(bottom=ft.BorderSide(1, ft.Colors.GREY_200)),
-        shadow=ft.BoxShadow(
-            blur_radius=4,
-            color=ft.Colors.with_opacity(0.06, ft.Colors.BLACK),
-            offset=ft.Offset(0, 2),
-        ),
-    )
+    def actualizar_ext_status_header(conectada: bool, version: str = ""):
+        QTimer.singleShot(0, lambda: _actualizar_en_hilo_principal(conectada, version))
 
-    return header_bar, actualizar_ext_status_header
+    return widget, actualizar_ext_status_header
