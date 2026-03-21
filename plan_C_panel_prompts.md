@@ -1,22 +1,51 @@
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QDialog,
-    QDialogButtonBox,
-    QFrame,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QScrollArea,
-    QSizePolicy,
-    QSlider,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
+# Plan C — `panel_prompts.py` (PyQt6)
+
+> **Alcance exacto:** 1 solo archivo.
+> - REEMPLAZAR: `ui/panel_prompts.py`
+>
+> **Al terminar este plan:** el módulo importa sin errores y la galería de prompts
+> funciona completa con su diálogo de edición.
+>
+> **Prerrequisito:** Planes A y B completados y verificados.
+>
+> **NO tocar:** ningún otro archivo.
+
+---
+
+## Contrato que debe mantener
+
+`ui_main.py` llama:
+```python
+expansion_prompts, obtener_prompts_para_ejecucion, actualizar_resumen_alcance = (
+    build_panel_prompts(
+        page,
+        state,
+        on_alcance_cambiado=lambda txt, desc: _sync_boton_ejecutar(txt, desc),
+    )
 )
+```
+
+El nuevo módulo debe retornar exactamente:
+- `widget` — `QGroupBox` montable (reemplaza `expansion_prompts`)
+- `obtener_prompts_para_ejecucion` — callable `() → (list, int)`
+- `actualizar_resumen_alcance` — callable `() → None`
+
+Y aceptar `(_page=None, state=None, on_alcance_cambiado=None)`.
+
+---
+
+## Contenido completo de `ui/panel_prompts.py`
+
+```python
+# ui/panel_prompts.py
+from PyQt6.QtWidgets import (
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QScrollArea, QSizePolicy, QSlider,
+    QTextEdit, QVBoxLayout, QWidget,
+)
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
 
 from config import (
     describir_alcance_prompts,
@@ -25,6 +54,10 @@ from config import (
     obtener_cortes_validos_prueba,
 )
 
+
+# ---------------------------------------------------------------------------
+# Helpers visuales
+# ---------------------------------------------------------------------------
 
 def _make_badge(texto, color_texto, color_fondo, color_borde):
     """Crea un QLabel con estilo de badge/chip redondeado."""
@@ -47,16 +80,20 @@ def _make_badge(texto, color_texto, color_fondo, color_borde):
 def _get_tier_label(val):
     if val >= 301:
         return f"{val} WPM ⚡ Turbo"
-    if val >= 121:
+    elif val >= 121:
         return f"{val} WPM 🏃 Rápido"
-    if val >= 51:
+    elif val >= 51:
         return f"{val} WPM 🚶 Palabra"
-    return f"{val} WPM 🐢 Stealth"
+    else:
+        return f"{val} WPM 🐢 Stealth"
 
+
+# ---------------------------------------------------------------------------
+# Diálogo de edición de un prompt
+# ---------------------------------------------------------------------------
 
 class _FocusTextEdit(QTextEdit):
     """QTextEdit que emite focus_lost al perder el foco."""
-
     focus_lost = pyqtSignal()
 
     def focusOutEvent(self, event):
@@ -77,25 +114,27 @@ class EditorPromptDialog(QDialog):
         self.setMinimumWidth(560)
         self.setMaximumWidth(600)
 
-        self._data = dict(prompt_data)
+        self._data = dict(prompt_data)   # copia local
         self._build_ui()
 
     def _build_ui(self):
-        prompt_data = self._data
+        p = self._data
         outer = QVBoxLayout(self)
         outer.setSpacing(10)
         outer.setContentsMargins(16, 16, 16, 16)
 
+        # --- Nombre ---
         outer.addWidget(QLabel("Nombre:"))
-        self.f_nombre = QLineEdit(prompt_data.get("nombre", ""))
+        self.f_nombre = QLineEdit(p.get("nombre", ""))
         self.f_nombre.setStyleSheet(
             "QLineEdit { border:1px solid #CBD5E0; border-radius:4px; padding:4px 8px; }"
         )
         outer.addWidget(self.f_nombre)
 
+        # --- Texto del prompt ---
         outer.addWidget(QLabel("Texto del prompt (usa [REF_TITLE] o [TITULO]):"))
         self.f_texto = _FocusTextEdit()
-        self.f_texto.setPlainText(prompt_data.get("texto", ""))
+        self.f_texto.setPlainText(p.get("texto", ""))
         self.f_texto.setMinimumHeight(120)
         self.f_texto.setMaximumHeight(200)
         self.f_texto.setStyleSheet(
@@ -104,6 +143,7 @@ class EditorPromptDialog(QDialog):
         )
         outer.addWidget(self.f_texto)
 
+        # --- Fila: modo + espera ---
         row1 = QWidget()
         hrow1 = QHBoxLayout(row1)
         hrow1.setContentsMargins(0, 0, 0, 0)
@@ -116,7 +156,7 @@ class EditorPromptDialog(QDialog):
         self.f_modo = QComboBox()
         self.f_modo.addItem("🆕 Nueva ventana", "nueva")
         self.f_modo.addItem("📌 Ventana activa", "activa")
-        idx_modo = self.f_modo.findData(prompt_data.get("modo", "nueva"))
+        idx_modo = self.f_modo.findData(p.get("modo", "nueva"))
         if idx_modo >= 0:
             self.f_modo.setCurrentIndex(idx_modo)
         self.f_modo.setStyleSheet(
@@ -129,7 +169,7 @@ class EditorPromptDialog(QDialog):
         vcol_espera = QVBoxLayout(col_espera)
         vcol_espera.setContentsMargins(0, 0, 0, 0)
         vcol_espera.addWidget(QLabel("Espera (segundos):"))
-        self.f_espera = QLineEdit(str(prompt_data.get("espera_segundos", 30)))
+        self.f_espera = QLineEdit(str(p.get("espera_segundos", 30)))
         self.f_espera.setMaximumWidth(150)
         self.f_espera.setStyleSheet(
             "QLineEdit { border:1px solid #CBD5E0; border-radius:4px; padding:4px 8px; }"
@@ -139,6 +179,7 @@ class EditorPromptDialog(QDialog):
         hrow1.addStretch()
         outer.addWidget(row1)
 
+        # --- Fila: post-acción + archivo ---
         row2 = QWidget()
         hrow2 = QHBoxLayout(row2)
         hrow2.setContentsMargins(0, 0, 0, 0)
@@ -152,7 +193,7 @@ class EditorPromptDialog(QDialog):
         self.f_post_accion.addItem("📥 Extraer [FINAL_TITLE]", "extraer_titulo")
         self.f_post_accion.addItem("📥 Guardar respuesta completa", "guardar_respuesta")
         self.f_post_accion.addItem("📤 Solo enviar", "solo_enviar")
-        idx_accion = self.f_post_accion.findData(prompt_data.get("post_accion", "solo_enviar"))
+        idx_accion = self.f_post_accion.findData(p.get("post_accion", "solo_enviar"))
         if idx_accion >= 0:
             self.f_post_accion.setCurrentIndex(idx_accion)
         self.f_post_accion.setStyleSheet(
@@ -165,7 +206,7 @@ class EditorPromptDialog(QDialog):
         vcol_archivo = QVBoxLayout(col_archivo)
         vcol_archivo.setContentsMargins(0, 0, 0, 0)
         vcol_archivo.addWidget(QLabel("Archivo de salida:"))
-        self.f_archivo = QLineEdit(prompt_data.get("archivo_salida", ""))
+        self.f_archivo = QLineEdit(p.get("archivo_salida", ""))
         self.f_archivo.setStyleSheet(
             "QLineEdit { border:1px solid #CBD5E0; border-radius:4px; padding:4px 8px; }"
         )
@@ -173,11 +214,13 @@ class EditorPromptDialog(QDialog):
         hrow2.addWidget(col_archivo)
         outer.addWidget(row2)
 
+        # --- Separador ---
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color: #E2E8F0;")
         outer.addWidget(sep)
 
+        # --- Sección Anti-Bot ---
         antibot_box = QFrame()
         antibot_box.setStyleSheet(
             "QFrame { border:1px solid #81E6D9; border-radius:8px; background:#F0FFF4; }"
@@ -189,10 +232,11 @@ class EditorPromptDialog(QDialog):
         self.f_antibot = QCheckBox(
             "🛡️ Anti-Bot (Escritura humanizada, pausas aleatorias, scroll)"
         )
-        self.f_antibot.setChecked(bool(prompt_data.get("antibot", True)))
+        self.f_antibot.setChecked(bool(p.get("antibot", True)))
         self.f_antibot.setStyleSheet("font-size: 12px;")
         vbox_ab.addWidget(self.f_antibot)
 
+        # Slider WPM
         wpm_row = QWidget()
         hbox_wpm = QHBoxLayout(wpm_row)
         hbox_wpm.setContentsMargins(0, 0, 0, 0)
@@ -207,7 +251,7 @@ class EditorPromptDialog(QDialog):
         self.f_wpm_slider.setMaximum(500)
         self.f_wpm_slider.setSingleStep(1)
         self.f_wpm_slider.setPageStep(20)
-        self.f_wpm_slider.setValue(prompt_data.get("wpm_escritura", 200))
+        self.f_wpm_slider.setValue(p.get("wpm_escritura", 200))
         self.f_wpm_slider.setStyleSheet(
             "QSlider::groove:horizontal { height:4px; background:#81E6D9; border-radius:2px; }"
             "QSlider::handle:horizontal { background:#319795; width:14px; height:14px;"
@@ -215,7 +259,7 @@ class EditorPromptDialog(QDialog):
         )
         hbox_wpm.addWidget(self.f_wpm_slider, stretch=1)
 
-        self.f_wpm_label = QLabel(_get_tier_label(prompt_data.get("wpm_escritura", 200)))
+        self.f_wpm_label = QLabel(_get_tier_label(p.get("wpm_escritura", 200)))
         self.f_wpm_label.setStyleSheet(
             "font-size: 13px; font-weight: bold; color: #2C7A7B;"
         )
@@ -238,6 +282,7 @@ class EditorPromptDialog(QDialog):
 
         outer.addWidget(antibot_box)
 
+        # --- Botones OK / Cancelar ---
         btn_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel
             | QDialogButtonBox.StandardButton.Save
@@ -258,33 +303,38 @@ class EditorPromptDialog(QDialog):
         except ValueError:
             espera = 30
         return {
-            "nombre": self.f_nombre.text().strip(),
-            "texto": self.f_texto.toPlainText(),
-            "modo": self.f_modo.currentData(),
+            "nombre":        self.f_nombre.text().strip(),
+            "texto":         self.f_texto.toPlainText(),
+            "modo":          self.f_modo.currentData(),
             "espera_segundos": espera,
-            "post_accion": self.f_post_accion.currentData(),
+            "post_accion":   self.f_post_accion.currentData(),
             "archivo_salida": self.f_archivo.text().strip(),
-            "antibot": self.f_antibot.isChecked(),
+            "antibot":       self.f_antibot.isChecked(),
             "wpm_escritura": self.f_wpm_slider.value(),
         }
 
 
-def _crear_tarjeta(idx, p, on_toggle, on_editar, on_subir, on_bajar, on_eliminar, es_primero, es_ultimo):
+# ---------------------------------------------------------------------------
+# Tarjeta de un prompt en la galería
+# ---------------------------------------------------------------------------
+
+def _crear_tarjeta(idx, p, on_toggle, on_editar, on_subir, on_bajar, on_eliminar,
+                   es_primero, es_ultimo):
     """
     Construye el QFrame que representa un prompt en la galería.
     Equivale a la variable `card` en el código Flet original.
     """
     habilitado = p.get("habilitado", True)
-    nombre = p.get("nombre", f"Prompt {idx + 1}")
-    antibot = p.get("antibot", False)
-    wpm = p.get("wpm_escritura", 45)
-    modo = p.get("modo", "nueva")
-    espera = p.get("espera_segundos", 30)
-    accion = p.get("post_accion", "solo_enviar")
-    archivo = p.get("archivo_salida", "")
+    nombre     = p.get("nombre", f"Prompt {idx + 1}")
+    antibot    = p.get("antibot", False)
+    wpm        = p.get("wpm_escritura", 45)
+    modo       = p.get("modo", "nueva")
+    espera     = p.get("espera_segundos", 30)
+    accion     = p.get("post_accion", "solo_enviar")
+    archivo    = p.get("archivo_salida", "")
 
-    borde = "#68D391" if habilitado else "#CBD5E0"
-    fondo = "white" if habilitado else "#F7FAFC"
+    borde  = "#68D391" if habilitado else "#CBD5E0"
+    fondo  = "white"   if habilitado else "#F7FAFC"
 
     card = QFrame()
     card.setStyleSheet(
@@ -296,6 +346,7 @@ def _crear_tarjeta(idx, p, on_toggle, on_editar, on_subir, on_bajar, on_eliminar
     vbox.setContentsMargins(12, 10, 12, 10)
     vbox.setSpacing(6)
 
+    # --- Fila 1: número + switch + nombre ---
     row1 = QWidget()
     hrow1 = QHBoxLayout(row1)
     hrow1.setContentsMargins(0, 0, 0, 0)
@@ -332,6 +383,7 @@ def _crear_tarjeta(idx, p, on_toggle, on_editar, on_subir, on_bajar, on_eliminar
     hrow1.addWidget(lbl_nombre, stretch=1)
     vbox.addWidget(row1)
 
+    # --- Fila 2: badges ---
     badges_row = QWidget()
     badges_layout = QHBoxLayout(badges_row)
     badges_layout.setContentsMargins(0, 0, 0, 0)
@@ -339,14 +391,10 @@ def _crear_tarjeta(idx, p, on_toggle, on_editar, on_subir, on_bajar, on_eliminar
     badges_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
     if antibot:
-        if wpm >= 301:
-            tier = "⚡"
-        elif wpm >= 121:
-            tier = "🏃"
-        elif wpm >= 51:
-            tier = "🚶"
-        else:
-            tier = "🐢"
+        if wpm >= 301:   tier = "⚡"
+        elif wpm >= 121: tier = "🏃"
+        elif wpm >= 51:  tier = "🚶"
+        else:            tier = "🐢"
         badges_layout.addWidget(
             _make_badge(f"🛡️ {wpm} WPM {tier}", "#285E61", "#E6FFFA", "#81E6D9")
         )
@@ -356,13 +404,14 @@ def _crear_tarjeta(idx, p, on_toggle, on_editar, on_subir, on_bajar, on_eliminar
     badges_layout.addWidget(_make_badge(f"⏳ {espera}s", "#7B341E", "#FFFAF0", "#FBD38D"))
 
     if accion == "extraer_titulo":
-        badges_layout.addWidget(_make_badge("📥 Título", "#553C9A", "#FAF5FF", "#D6BCFA"))
+        badges_layout.addWidget(_make_badge("📥 Título",   "#553C9A", "#FAF5FF", "#D6BCFA"))
     elif accion == "guardar_respuesta":
         badges_layout.addWidget(_make_badge("📥 Respuesta", "#553C9A", "#FAF5FF", "#D6BCFA"))
 
     badges_layout.addStretch()
     vbox.addWidget(badges_row)
 
+    # --- Fila 3: archivo de salida (condicional) ---
     if archivo:
         lbl_archivo = QLabel(f"💾 {archivo}")
         lbl_archivo.setStyleSheet(
@@ -370,6 +419,7 @@ def _crear_tarjeta(idx, p, on_toggle, on_editar, on_subir, on_bajar, on_eliminar
         )
         vbox.addWidget(lbl_archivo)
 
+    # --- Fila 4: botones de acción ---
     btn_row = QWidget()
     hbtn = QHBoxLayout(btn_row)
     hbtn.setContentsMargins(0, 0, 0, 0)
@@ -377,30 +427,34 @@ def _crear_tarjeta(idx, p, on_toggle, on_editar, on_subir, on_bajar, on_eliminar
     hbtn.addStretch()
 
     def _icon_btn(emoji, tooltip, callback, disabled=False):
-        button = QPushButton(emoji)
-        button.setToolTip(tooltip)
-        button.setFixedSize(28, 28)
-        button.setEnabled(not disabled)
-        button.setStyleSheet(
+        b = QPushButton(emoji)
+        b.setToolTip(tooltip)
+        b.setFixedSize(28, 28)
+        b.setEnabled(not disabled)
+        b.setStyleSheet(
             "QPushButton { border:none; background:transparent; font-size:14px; }"
             "QPushButton:hover { background:#EDF2F7; border-radius:4px; }"
             "QPushButton:disabled { color:#CBD5E0; }"
         )
-        button.clicked.connect(callback)
-        return button
+        b.clicked.connect(callback)
+        return b
 
-    hbtn.addWidget(_icon_btn("✏️", "Editar", lambda _, i=idx: on_editar(i)))
-    hbtn.addWidget(_icon_btn("⬆️", "Subir", lambda _, i=idx: on_subir(i), disabled=es_primero))
-    hbtn.addWidget(_icon_btn("⬇️", "Bajar", lambda _, i=idx: on_bajar(i), disabled=es_ultimo))
+    hbtn.addWidget(_icon_btn("✏️", "Editar",  lambda _, i=idx: on_editar(i)))
+    hbtn.addWidget(_icon_btn("⬆️", "Subir",   lambda _, i=idx: on_subir(i),   disabled=es_primero))
+    hbtn.addWidget(_icon_btn("⬇️", "Bajar",   lambda _, i=idx: on_bajar(i),   disabled=es_ultimo))
     hbtn.addWidget(_icon_btn("🗑️", "Eliminar", lambda _, i=idx: on_eliminar(i)))
 
     vbox.addWidget(btn_row)
     return card
 
 
+# ---------------------------------------------------------------------------
+# Función principal del módulo
+# ---------------------------------------------------------------------------
+
 def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
     """
-    Panel de Prompts -> ChatGPT.
+    Panel de Prompts → ChatGPT.
 
     Parámetros
     ----------
@@ -414,10 +468,13 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
      obtener_prompts_para_ejecucion: callable,
      actualizar_resumen_alcance: callable)
     """
-    prompts_lista = state.prompts_lista
+    prompts_lista        = state.prompts_lista
     ejecutar_hasta_prompt = state.ejecutar_hasta_prompt
-    config_actual = state.config_actual
+    config_actual        = state.config_actual
 
+    # -----------------------------------------------------------------------
+    # Widget raíz
+    # -----------------------------------------------------------------------
     group = QGroupBox("💬 Prompts → ChatGPT")
     group.setCheckable(True)
     group.setChecked(False)
@@ -430,6 +487,9 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
     outer.setContentsMargins(8, 12, 8, 8)
     outer.setSpacing(8)
 
+    # -----------------------------------------------------------------------
+    # Barra de acciones superiores
+    # -----------------------------------------------------------------------
     toolbar = QWidget()
     htool = QHBoxLayout(toolbar)
     htool.setContentsMargins(0, 0, 0, 0)
@@ -440,36 +500,40 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
     htool.addWidget(lbl_count)
     htool.addStretch()
 
-    btn_style_outline = (
+    _btn_style_outline = (
         "QPushButton { border:1px solid #CBD5E0; background:white; border-radius:6px;"
         " padding:4px 10px; font-size:12px; }"
         "QPushButton:hover { background:#F7FAFC; }"
     )
-    btn_style_purple = (
+    _btn_style_purple = (
         "QPushButton { background:#6B46C1; color:white; border-radius:6px;"
         " padding:4px 10px; font-size:12px; font-weight:bold; }"
         "QPushButton:hover { background:#553C9A; }"
     )
 
     btn_desactivar = QPushButton("⊘  Desactivar todos")
-    btn_desactivar.setStyleSheet(btn_style_outline)
+    btn_desactivar.setStyleSheet(_btn_style_outline)
     htool.addWidget(btn_desactivar)
 
     btn_activar = QPushButton("✔  Activar todos")
-    btn_activar.setStyleSheet(btn_style_outline)
+    btn_activar.setStyleSheet(_btn_style_outline)
     htool.addWidget(btn_activar)
 
     btn_agregar = QPushButton("➕  Agregar Prompt")
-    btn_agregar.setStyleSheet(btn_style_purple)
+    btn_agregar.setStyleSheet(_btn_style_purple)
     htool.addWidget(btn_agregar)
 
     outer.addWidget(toolbar)
 
+    # --- Separador ---
     sep1 = QFrame()
     sep1.setFrameShape(QFrame.Shape.HLine)
     sep1.setStyleSheet("color:#E2E8F0;")
     outer.addWidget(sep1)
 
+    # -----------------------------------------------------------------------
+    # Galería de prompts (scroll)
+    # -----------------------------------------------------------------------
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setMinimumHeight(300)
@@ -486,6 +550,9 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
     scroll.setWidget(galeria_container)
     outer.addWidget(scroll)
 
+    # -----------------------------------------------------------------------
+    # Sección de alcance
+    # -----------------------------------------------------------------------
     sep2 = QFrame()
     sep2.setFrameShape(QFrame.Shape.HLine)
     sep2.setStyleSheet("color:#E2E8F0;")
@@ -515,6 +582,10 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
         "QPushButton:hover { background:#9C4221; }"
     )
     outer.addWidget(btn_guardar_alcance)
+
+    # -----------------------------------------------------------------------
+    # Lógica interna (equivale a las funciones del original Flet)
+    # -----------------------------------------------------------------------
 
     def guardar_prompts():
         ejecutar_hasta_prompt[0] = normalizar_ejecutar_hasta_prompt(
@@ -577,6 +648,7 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
         actualizar_resumen_alcance()
 
     def refrescar_prompts():
+        # Eliminar tarjetas anteriores (todo excepto el stretch al final)
         while galeria_layout.count() > 1:
             item = galeria_layout.takeAt(0)
             if item.widget():
@@ -585,34 +657,34 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
         lbl_count.setText(f"{len(prompts_lista)} prompts")
         total = len(prompts_lista)
 
-        for idx, prompt in enumerate(prompts_lista):
+        for idx, p in enumerate(prompts_lista):
             tarjeta = _crear_tarjeta(
-                idx,
-                prompt,
-                on_toggle=toggle_prompt,
-                on_editar=abrir_editor_prompt,
-                on_subir=lambda i: mover_prompt(i, -1),
-                on_bajar=lambda i: mover_prompt(i, 1),
-                on_eliminar=eliminar_prompt,
-                es_primero=(idx == 0),
-                es_ultimo=(idx == total - 1),
+                idx, p,
+                on_toggle   = toggle_prompt,
+                on_editar   = abrir_editor_prompt,
+                on_subir    = lambda i: mover_prompt(i, -1),
+                on_bajar    = lambda i: mover_prompt(i,  1),
+                on_eliminar = eliminar_prompt,
+                es_primero  = (idx == 0),
+                es_ultimo   = (idx == total - 1),
             )
             galeria_layout.insertWidget(galeria_layout.count() - 1, tarjeta)
 
+    # CRUD de prompts
     def toggle_prompt(idx, valor):
         prompts_lista[idx]["habilitado"] = valor
         guardar_prompts()
         refrescar_prompts()
 
     def deshabilitar_todos():
-        for prompt in prompts_lista:
-            prompt["habilitado"] = False
+        for p in prompts_lista:
+            p["habilitado"] = False
         guardar_prompts()
         refrescar_prompts()
 
     def habilitar_todos():
-        for prompt in prompts_lista:
-            prompt["habilitado"] = True
+        for p in prompts_lista:
+            p["habilitado"] = True
         guardar_prompts()
         refrescar_prompts()
 
@@ -620,8 +692,7 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
         nuevo_idx = idx + direccion
         if 0 <= nuevo_idx < len(prompts_lista):
             prompts_lista[idx], prompts_lista[nuevo_idx] = (
-                prompts_lista[nuevo_idx],
-                prompts_lista[idx],
+                prompts_lista[nuevo_idx], prompts_lista[idx]
             )
             guardar_prompts()
             refrescar_prompts()
@@ -633,14 +704,14 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
 
     def agregar_prompt_nuevo():
         nuevo = {
-            "nombre": f"Nuevo Prompt {len(prompts_lista) + 1}",
-            "texto": "",
-            "modo": "nueva",
+            "nombre":         f"Nuevo Prompt {len(prompts_lista) + 1}",
+            "texto":          "",
+            "modo":           "nueva",
             "espera_segundos": 30,
-            "habilitado": True,
-            "antibot": True,
-            "wpm_escritura": 200,
-            "post_accion": "solo_enviar",
+            "habilitado":     True,
+            "antibot":        True,
+            "wpm_escritura":  200,
+            "post_accion":    "solo_enviar",
             "archivo_salida": "",
         }
         prompts_lista.append(nuevo)
@@ -655,14 +726,85 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
             guardar_prompts()
             refrescar_prompts()
 
+    # Conexiones de botones
     btn_desactivar.clicked.connect(deshabilitar_todos)
     btn_activar.clicked.connect(habilitar_todos)
     btn_agregar.clicked.connect(agregar_prompt_nuevo)
     combo_alcance.currentIndexChanged.connect(lambda _: persistir_alcance_ejecucion())
     btn_guardar_alcance.clicked.connect(persistir_alcance_ejecucion)
 
+    # Inicialización (igual que el final del original Flet)
     actualizar_selector_ejecucion()
     actualizar_resumen_alcance()
     refrescar_prompts()
 
     return group, obtener_prompts_para_ejecucion, actualizar_resumen_alcance
+```
+
+---
+
+## Verificación
+
+```bash
+python -c "
+import sys
+from PyQt6.QtWidgets import QApplication
+app = QApplication(sys.argv)
+from ui.state import AppState
+from ui.panel_prompts import build_panel_prompts
+
+state = AppState()
+cambios = []
+def on_cambio(txt, desc):
+    cambios.append((txt, desc))
+    print('alcance:', txt, '|', desc)
+
+w, get_prompts, actualizar = build_panel_prompts(None, state, on_alcance_cambiado=on_cambio)
+w.setChecked(True)   # expandir para ver el contenido
+w.resize(460, 600)
+w.show()
+print('panel_prompts OK — prompts cargados:', len(state.prompts_lista))
+app.exec()
+"
+```
+
+**Criterio de éxito:**
+- Imprime `panel_prompts OK` sin excepciones
+- El panel muestra una tarjeta por cada prompt en el config
+- Al hacer clic en ✏️ se abre el diálogo de edición
+- Al guardar en el diálogo, la tarjeta se actualiza
+- Los botones ⬆️ ⬇️ reordenan las tarjetas
+- El combo de alcance refleja los cortes válidos
+
+---
+
+## Verificación de integración con los planes anteriores
+
+```bash
+python -c "
+from ui.compat          import PageCompat, ProgressBarCompat, TextCompat, DropdownCompat
+from ui.consola         import build_consola
+from ui.tracker         import construir_tracker_fases
+from ui.header          import build_header
+from ui.panel_proyecto  import build_panel_proyecto
+from ui.panel_tts       import build_panel_tts
+from ui.panel_whisperx  import build_panel_whisperx
+from ui.panel_ai_studio import build_panel_ai_studio
+from ui.panel_prompts   import build_panel_prompts
+from ui.state           import AppState
+print('Planes A + B + C: todos los modulos importan OK')
+"
+```
+
+**Criterio de éxito:** Imprime el mensaje sin errores.
+
+---
+
+## Qué viene después
+
+Al terminar el Plan C quedan pendientes:
+- `ui/panel_flow.py`
+- `ui_main.py`
+- `clusiv-auto.py`
+
+El **Plan D** los migra todos y deja la app completamente en PyQt6.
