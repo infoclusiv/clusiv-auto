@@ -76,6 +76,52 @@ class FlowContext:
         self.reset_tracker = reset_tracker or (lambda: None)
 
 
+def enfocar_input_chatgpt(ventana, antibot=False, stop_event=None):
+    if stop_event and stop_event.is_set():
+        return False
+
+    try:
+        if hasattr(ventana, "isMinimized") and ventana.isMinimized:
+            ventana.restore()
+
+        ventana.activate()
+
+        if antibot:
+            if not espera_humanizada(1.2, stop_event):
+                return False
+        else:
+            if not sleep_cancelable(1.2, stop_event):
+                return False
+
+        if stop_event and stop_event.is_set():
+            return False
+
+        ancho, alto = ventana.size
+        base_x = ventana.left
+        base_y = ventana.top
+
+        puntos_click = [
+            (base_x + (ancho // 2), base_y + int(alto * 0.92)),
+            (base_x + (ancho // 2), base_y + int(alto * 0.88)),
+        ]
+
+        for x, y in puntos_click:
+            pyautogui.click(x, y)
+            if antibot:
+                if not espera_humanizada(0.35, stop_event):
+                    return False
+            else:
+                if not sleep_cancelable(0.35, stop_event):
+                    return False
+
+            if stop_event and stop_event.is_set():
+                return False
+
+        return True
+    except Exception:
+        return False
+
+
 def abrir_y_pegar_chatgpt(prompt_final, modo="nueva", antibot=False, wpm=45, stop_event=None):
     if stop_event and stop_event.is_set():
         return False
@@ -105,12 +151,11 @@ def abrir_y_pegar_chatgpt(prompt_final, modo="nueva", antibot=False, wpm=45, sto
         try:
             if stop_event and stop_event.is_set():
                 return False
-            ventana_encontrada.activate()
-            if antibot:
-                if not espera_humanizada(2, stop_event):
-                    return False
-            else:
-                if not sleep_cancelable(2, stop_event):
+            if not enfocar_input_chatgpt(
+                ventana_encontrada,
+                antibot=antibot,
+                stop_event=stop_event,
+            ):
                     return False
 
             if stop_event and stop_event.is_set():

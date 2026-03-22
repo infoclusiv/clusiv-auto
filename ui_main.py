@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -153,35 +154,9 @@ class MainWindow(QMainWindow):
         self._ensamblar_layout()
 
     def _ensamblar_layout(self):
-        col_izq_inner = QWidget()
-        vbox_izq = QVBoxLayout(col_izq_inner)
-        vbox_izq.setContentsMargins(8, 8, 4, 8)
-        vbox_izq.setSpacing(4)
-
-        lbl_config = QLabel("Configuración del Pipeline")
-        lbl_config.setStyleSheet(
-            "color:#A0AEC0; font-size:11px; font-style:italic; font-weight:bold;"
-        )
-        vbox_izq.addWidget(lbl_config)
-        for panel in [
-            self.panel_proyecto,
-            self.panel_prompts,
-            self.panel_tts,
-            self.panel_whisperx,
-            self.panel_ai_studio,
-            self.panel_flow,
-        ]:
-            vbox_izq.addWidget(panel)
-        vbox_izq.addStretch()
-
-        scroll_izq = QScrollArea()
-        scroll_izq.setWidget(col_izq_inner)
-        scroll_izq.setWidgetResizable(True)
-        scroll_izq.setFixedWidth(440)
-        scroll_izq.setFrameShape(QFrame.Shape.NoFrame)
-
         col_central = QWidget()
-        col_central.setFixedWidth(330)
+        col_central.setMinimumWidth(320)
+        col_central.setMaximumWidth(420)
         vbox_central = QVBoxLayout(col_central)
         vbox_central.setContentsMargins(8, 16, 8, 16)
         vbox_central.setSpacing(8)
@@ -248,29 +223,165 @@ class MainWindow(QMainWindow):
         vbox_derecha.addWidget(lbl_imgs)
         vbox_derecha.addWidget(self.lbl_imagen_status_sidebar)
 
-        def _sep_v():
-            separator = QFrame()
-            separator.setFrameShape(QFrame.Shape.VLine)
-            separator.setStyleSheet("color:#E2E8F0;")
-            return separator
+        barra_config = QWidget()
+        hbox_config = QHBoxLayout(barra_config)
+        hbox_config.setContentsMargins(16, 12, 16, 4)
+        hbox_config.setSpacing(12)
+
+        config_intro = QWidget()
+        vbox_intro = QVBoxLayout(config_intro)
+        vbox_intro.setContentsMargins(0, 0, 0, 0)
+        vbox_intro.setSpacing(2)
+
+        lbl_config = QLabel("Configuración del Pipeline")
+        lbl_config.setStyleSheet("font-size:18px; font-weight:bold; color:#1A202C;")
+        lbl_config_sub = QLabel(
+            "Configura cada sección en pantalla completa y pasa a Ejecución cuando termines."
+        )
+        lbl_config_sub.setWordWrap(True)
+        lbl_config_sub.setStyleSheet("font-size:12px; color:#718096;")
+        vbox_intro.addWidget(lbl_config)
+        vbox_intro.addWidget(lbl_config_sub)
+
+        btn_ir_ejecucion = QPushButton("Ir a Ejecución")
+        btn_ir_ejecucion.setFixedHeight(36)
+        btn_ir_ejecucion.setStyleSheet(
+            "QPushButton { background:#2B6CB0; color:white; border-radius:6px;"
+            " padding:0 14px; font-size:12px; font-weight:bold; }"
+            "QPushButton:hover { background:#2C5282; }"
+        )
+        btn_ir_ejecucion.clicked.connect(self._mostrar_tab_ejecucion)
+
+        hbox_config.addWidget(config_intro, stretch=1)
+        hbox_config.addWidget(btn_ir_ejecucion)
+
+        self.tabs_config = QTabWidget()
+        self.tabs_config.setDocumentMode(True)
+        self.tabs_config.setMovable(False)
+        self.tabs_config.setStyleSheet(
+            "QTabWidget::pane { border:1px solid #E2E8F0; border-radius:8px; background:white; }"
+            "QTabBar::tab { background:#EDF2F7; color:#4A5568; padding:10px 16px;"
+            " margin:4px 4px 0 0; border-top-left-radius:8px; border-top-right-radius:8px; }"
+            "QTabBar::tab:selected { background:white; color:#1A202C; font-weight:bold; }"
+        )
+
+        for titulo, panel in [
+            ("Proyecto", self.panel_proyecto),
+            ("Prompts", self.panel_prompts),
+            ("TTS", self.panel_tts),
+            ("WhisperX", self.panel_whisperx),
+            ("AI Studio", self.panel_ai_studio),
+            ("Google Flow", self.panel_flow),
+        ]:
+            self.tabs_config.addTab(self._build_tab_config(panel), titulo)
+
+        vista_config = QWidget()
+        vbox_config = QVBoxLayout(vista_config)
+        vbox_config.setContentsMargins(0, 0, 0, 0)
+        vbox_config.setSpacing(0)
+        vbox_config.addWidget(barra_config)
+        vbox_config.addWidget(self.tabs_config, stretch=1)
+
+        barra_ejecucion = QWidget()
+        hbox_exec = QHBoxLayout(barra_ejecucion)
+        hbox_exec.setContentsMargins(16, 12, 16, 4)
+        hbox_exec.setSpacing(12)
+
+        exec_intro = QWidget()
+        vbox_exec_intro = QVBoxLayout(exec_intro)
+        vbox_exec_intro.setContentsMargins(0, 0, 0, 0)
+        vbox_exec_intro.setSpacing(2)
+
+        lbl_exec = QLabel("Pipeline de Ejecución")
+        lbl_exec.setStyleSheet("font-size:18px; font-weight:bold; color:#1A202C;")
+        lbl_exec_sub = QLabel(
+            "Esta vista concentra el estado del flujo, el tracker y la consola durante la corrida."
+        )
+        lbl_exec_sub.setWordWrap(True)
+        lbl_exec_sub.setStyleSheet("font-size:12px; color:#718096;")
+        vbox_exec_intro.addWidget(lbl_exec)
+        vbox_exec_intro.addWidget(lbl_exec_sub)
+
+        btn_volver_config = QPushButton("Volver a Configuración")
+        btn_volver_config.setFixedHeight(36)
+        btn_volver_config.setStyleSheet(
+            "QPushButton { background:#EDF2F7; color:#2D3748; border:1px solid #CBD5E0;"
+            " border-radius:6px; padding:0 14px; font-size:12px; font-weight:bold; }"
+            "QPushButton:hover { background:#E2E8F0; }"
+        )
+        btn_volver_config.clicked.connect(self._mostrar_tab_configuracion)
+
+        hbox_exec.addWidget(exec_intro, stretch=1)
+        hbox_exec.addWidget(btn_volver_config)
 
         main_row = QWidget()
         hbox_main = QHBoxLayout(main_row)
         hbox_main.setContentsMargins(0, 0, 0, 0)
         hbox_main.setSpacing(0)
-        hbox_main.addWidget(scroll_izq)
-        hbox_main.addWidget(_sep_v())
         hbox_main.addWidget(col_central)
-        hbox_main.addWidget(_sep_v())
+
+        sep_v = QFrame()
+        sep_v.setFrameShape(QFrame.Shape.VLine)
+        sep_v.setStyleSheet("color:#E2E8F0;")
+        hbox_main.addWidget(sep_v)
         hbox_main.addWidget(col_derecha, stretch=1)
+
+        vista_ejecucion = QWidget()
+        vbox_ejecucion = QVBoxLayout(vista_ejecucion)
+        vbox_ejecucion.setContentsMargins(0, 0, 0, 0)
+        vbox_ejecucion.setSpacing(0)
+        vbox_ejecucion.addWidget(barra_ejecucion)
+        vbox_ejecucion.addWidget(main_row, stretch=1)
+
+        self.tabs_principales = QTabWidget()
+        self.tabs_principales.setDocumentMode(True)
+        self.tabs_principales.setMovable(False)
+        self.tabs_principales.setStyleSheet(
+            "QTabWidget::pane { border:none; background:#F7FAFC; }"
+            "QTabBar::tab { background:#E2E8F0; color:#4A5568; padding:12px 20px;"
+            " margin:0 6px 0 0; border-top-left-radius:10px; border-top-right-radius:10px; }"
+            "QTabBar::tab:selected { background:#F7FAFC; color:#1A202C; font-weight:bold; }"
+        )
+        self.tabs_principales.addTab(vista_config, "Configuración")
+        self.tabs_principales.addTab(vista_ejecucion, "Ejecución")
 
         central = QWidget()
         vbox_main = QVBoxLayout(central)
         vbox_main.setContentsMargins(0, 0, 0, 0)
         vbox_main.setSpacing(0)
         vbox_main.addWidget(self.header_widget)
-        vbox_main.addWidget(main_row, stretch=1)
+        vbox_main.addWidget(self.tabs_principales, stretch=1)
         self.setCentralWidget(central)
+
+    def _build_tab_config(self, panel):
+        if hasattr(panel, "setCheckable"):
+            panel.setCheckable(False)
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(16, 12, 16, 16)
+        container_layout.setSpacing(0)
+        container_layout.addWidget(panel)
+        container_layout.addStretch()
+
+        scroll.setWidget(container)
+        layout.addWidget(scroll)
+        return tab
+
+    def _mostrar_tab_configuracion(self):
+        self.tabs_principales.setCurrentIndex(0)
+
+    def _mostrar_tab_ejecucion(self):
+        self.tabs_principales.setCurrentIndex(1)
 
     def _connect_ws_bridge(self):
         ws_bridge.ui_log_cb = self.log_msg
@@ -356,6 +467,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No hay prompts configurados", 4000)
             return
 
+        self._mostrar_tab_ejecucion()
         self.limpiar_log()
         self.prg_compat.visible = True
         self._set_estado_ejecutando(True)

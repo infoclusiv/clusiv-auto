@@ -98,7 +98,6 @@ def build_panel_proyecto(_page=None, state=None, on_ruta_cambiada=None):
 
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
-    scroll.setMaximumHeight(250)
     scroll.setFrameShape(QFrame.Shape.NoFrame)
 
     lista_container = QWidget()

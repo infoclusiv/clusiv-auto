@@ -109,7 +109,6 @@ def build_panel_flow(_page=None, state=None, log_msg=None):
     scroll_area = QScrollArea()
     scroll_area.setWidgetResizable(True)
     scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-    scroll_area.setMaximumHeight(600)
 
     inner = QWidget()
     outer = QVBoxLayout(inner)

@@ -472,8 +472,7 @@ def build_panel_prompts(_page=None, state=None, on_alcance_cambiado=None):
 
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
-    scroll.setMinimumHeight(300)
-    scroll.setMaximumHeight(480)
+    scroll.setMinimumHeight(0)
     scroll.setFrameShape(QFrame.Shape.NoFrame)
     scroll.setStyleSheet("QScrollArea { border:none; }")
 

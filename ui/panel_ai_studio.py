@@ -64,8 +64,7 @@ def build_panel_ai_studio(_page=None, state=None):
     txt_prompt = _FocusTextEdit()
     txt_prompt.setPlainText(ai_studio_config.get("prompt", ""))
     txt_prompt.setPlaceholderText("Escribe aquí el prompt que se pegará en AI Studio...")
-    txt_prompt.setMinimumHeight(80)
-    txt_prompt.setMaximumHeight(160)
+    txt_prompt.setMinimumHeight(180)
     txt_prompt.setStyleSheet(
         "QTextEdit { border: 1px solid #CBD5E0; border-radius: 4px;"
         " padding: 4px 8px; font-size: 12px; }"
