@@ -1,12 +1,27 @@
-"""ui_main.py - Interfaz principal de Clusiv Automation."""
+"""ui_main.py - Interfaz principal de Clusiv Automation (PyQt6)."""
 
-import flet as ft
+import sys
 
+from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
+
+import ws_bridge
 from config import YOUTUBE_API_KEY
 from flow_orchestrator import FlowContext, ejecutar_flujo
-import ws_bridge
 from youtube_analyzer import obtener_siguiente_num
 
+from ui.compat import DropdownCompat, PageCompat, ProgressBarCompat, TextCompat
 from ui.consola import build_consola
 from ui.header import build_header
 from ui.panel_ai_studio import build_panel_ai_studio
@@ -19,299 +34,367 @@ from ui.state import AppState
 from ui.tracker import construir_tracker_fases
 
 
-def main(page: ft.Page):
-    page.title = "Clusiv Automation Hub"
-    page.theme_mode = ft.ThemeMode.LIGHT
-    page.bgcolor = "#F0F2F6"
-    page.padding = 0
-    page.scroll = None
+class _FlowWorker(QThread):
+    finished = pyqtSignal()
 
-    state = AppState()
+    def __init__(self, ctx):
+        super().__init__()
+        self._ctx = ctx
 
-    log_container, log_msg, limpiar_log = build_consola(page)
-    ws_bridge.ui_log_cb = log_msg
+    def run(self):
+        try:
+            ejecutar_flujo(self._ctx)
+        finally:
+            self.finished.emit()
 
-    tracker_widget, set_fase_estado, reset_tracker = construir_tracker_fases(page)
 
-    header_bar, actualizar_ext_status_header = build_header(page)
-    ws_bridge.ui_ext_status_cb = actualizar_ext_status_header
+class _RefModeComboProxy:
+    def __init__(self, get_ref_mode_fn):
+        self._get_ref_mode_fn = get_ref_mode_fn
 
-    prg = ft.ProgressBar(width=400, visible=False, color=ft.Colors.GREEN_700)
-    txt_proximo = ft.Text(size=14, weight="bold", color=ft.Colors.BLUE_GREY_700)
-    txt_alcance_flujo = ft.Text(size=12, color=ft.Colors.BLUE_GREY_600, italic=True)
-    btn_ejecutar_ref = [None]
+    def currentData(self):
+        return self._get_ref_mode_fn()
 
-    def _show_snack(msg, color=ft.Colors.GREEN):
-        page.overlay.append(ft.SnackBar(content=ft.Text(msg), bgcolor=color))
-        page.overlay[-1].open = True
-        page.update()
+    def currentText(self):
+        return self._get_ref_mode_fn()
 
-    def _actualizar_txt_proximo(ruta):
-        txt_proximo.value = f"Próximo Proyecto: video {obtener_siguiente_num(ruta)}"
-        if page.controls:
-            page.update()
+    def findData(self, value):
+        return 0 if value == self._get_ref_mode_fn() else -1
 
-    def _sync_boton_ejecutar(texto_boton, descripcion):
-        if btn_ejecutar_ref[0]:
-            btn_ejecutar_ref[0].text = texto_boton
-        txt_alcance_flujo.value = f"Alcance actual: {descripcion}"
-        if page.controls:
-            page.update()
+    def setCurrentIndex(self, index):
+        return None
 
-    expansion_proyecto, picker, refrescar_canales, _ = build_panel_proyecto(
-        page,
-        state,
-        on_ruta_cambiada=lambda ruta: _actualizar_txt_proximo(ruta),
-    )
-    page.services.append(picker)
 
-    expansion_prompts, obtener_prompts_para_ejecucion, actualizar_resumen_alcance = (
-        build_panel_prompts(
-            page,
-            state,
-            on_alcance_cambiado=lambda txt, desc: _sync_boton_ejecutar(txt, desc),
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Clusiv Automation Hub")
+        self.setMinimumSize(1200, 700)
+        self._flow_worker = None
+
+        self.state = AppState()
+        self._build_ui()
+        self._connect_ws_bridge()
+        self._init_estado_inicial()
+
+    def _build_ui(self):
+        self.log_widget, self.log_msg, self.limpiar_log = build_consola()
+        self.tracker_widget, self.set_fase_estado, self.reset_tracker = construir_tracker_fases()
+        self.header_widget, self.actualizar_ext_status = build_header()
+
+        self.page_compat = PageCompat()
+        self.prg_compat = ProgressBarCompat(on_visible_change=self._on_prg_visible)
+        self.txt_proximo_compat = TextCompat(on_value_change=self._on_txt_proximo_change)
+        self.dropdown_ref_compat = DropdownCompat(default_value="ingredients")
+
+        self.panel_proyecto, _, self.refrescar_canales, _ = build_panel_proyecto(
+            None,
+            self.state,
+            on_ruta_cambiada=self._actualizar_txt_proximo,
         )
-    )
+        (
+            self.panel_prompts,
+            self.obtener_prompts_para_ejecucion,
+            self.actualizar_resumen_alcance,
+        ) = build_panel_prompts(
+            None,
+            self.state,
+            on_alcance_cambiado=self._sync_boton_ejecutar,
+        )
+        self.panel_tts, _ = build_panel_tts(None, self.state, self.log_msg)
+        self.panel_whisperx, _ = build_panel_whisperx(None, self.state)
+        self.panel_ai_studio, _ = build_panel_ai_studio(None, self.state)
+        (
+            self.panel_flow,
+            _,
+            self.actualizar_estado_imagen,
+            self.refrescar_journeys_ui,
+            self.lbl_imagen_status_sidebar,
+            self._get_ref_mode,
+        ) = build_panel_flow(None, self.state, self.log_msg)
 
-    expansion_tts, _ = build_panel_tts(page, state, log_msg)
-    expansion_whisperx, _ = build_panel_whisperx(page, state)
-    expansion_ai_studio, _ = build_panel_ai_studio(page, state)
+        self.dropdown_ref_compat.set_combo(_RefModeComboProxy(self._get_ref_mode))
 
-    (
-        expansion_flow,
-        ref_images_picker,
-        actualizar_estado_imagen,
-        refrescar_journeys_ui,
-        lbl_imagen_status_sidebar,
-        get_ref_mode,
-    ) = build_panel_flow(page, state, log_msg)
-    page.services.append(ref_images_picker)
-    ws_bridge.ui_image_status_cb = actualizar_estado_imagen
-    ws_bridge.ui_update_journeys_cb = refrescar_journeys_ui
+        self.prg_bar = QProgressBar()
+        self.prg_bar.setRange(0, 0)
+        self.prg_bar.setVisible(False)
+        self.prg_bar.setFixedHeight(6)
+        self.prg_bar.setStyleSheet(
+            "QProgressBar { border:none; background:#E2E8F0; border-radius:3px; }"
+            "QProgressBar::chunk { background:#276749; border-radius:3px; }"
+        )
 
-    btn_detener = ft.ElevatedButton(
-        "DETENER FLUJO",
-        icon=ft.Icons.STOP_CIRCLE,
-        bgcolor=ft.Colors.RED_700,
-        color="white",
-        height=50,
-        width=1000,
-        visible=False,
-        on_click=lambda _: _detener_flujo(),
-    )
+        self.lbl_proximo = QLabel("")
+        self.lbl_proximo.setStyleSheet(
+            "font-weight: bold; font-size: 14px; color: #4A5568;"
+        )
 
-    def _detener_flujo():
-        state.stop_event.set()
-        btn_detener.disabled = True
-        btn_detener.text = "DETENIENDO..."
-        btn_detener.bgcolor = ft.Colors.GREY_500
-        log_msg(
+        self.lbl_alcance = QLabel("")
+        self.lbl_alcance.setStyleSheet(
+            "font-size: 12px; color: #718096; font-style: italic;"
+        )
+        self.lbl_alcance.setWordWrap(True)
+
+        self.btn_ejecutar = QPushButton("EJECUTAR FLUJO COMPLETO")
+        self.btn_ejecutar.setFixedHeight(50)
+        self.btn_ejecutar.setStyleSheet(self._style_btn_ejecutar(ejecutando=False))
+        self.btn_ejecutar.clicked.connect(self._ejecutar_flujo_completo)
+
+        self.btn_detener = QPushButton("DETENER FLUJO")
+        self.btn_detener.setFixedHeight(50)
+        self.btn_detener.setVisible(False)
+        self.btn_detener.setStyleSheet(
+            "QPushButton { background:#C53030; color:white; font-weight:bold;"
+            " font-size:13px; border-radius:6px; }"
+            "QPushButton:disabled { background:#A0AEC0; }"
+        )
+        self.btn_detener.clicked.connect(self._detener_flujo)
+
+        self._ensamblar_layout()
+
+    def _ensamblar_layout(self):
+        col_izq_inner = QWidget()
+        vbox_izq = QVBoxLayout(col_izq_inner)
+        vbox_izq.setContentsMargins(8, 8, 4, 8)
+        vbox_izq.setSpacing(4)
+
+        lbl_config = QLabel("Configuración del Pipeline")
+        lbl_config.setStyleSheet(
+            "color:#A0AEC0; font-size:11px; font-style:italic; font-weight:bold;"
+        )
+        vbox_izq.addWidget(lbl_config)
+        for panel in [
+            self.panel_proyecto,
+            self.panel_prompts,
+            self.panel_tts,
+            self.panel_whisperx,
+            self.panel_ai_studio,
+            self.panel_flow,
+        ]:
+            vbox_izq.addWidget(panel)
+        vbox_izq.addStretch()
+
+        scroll_izq = QScrollArea()
+        scroll_izq.setWidget(col_izq_inner)
+        scroll_izq.setWidgetResizable(True)
+        scroll_izq.setFixedWidth(440)
+        scroll_izq.setFrameShape(QFrame.Shape.NoFrame)
+
+        col_central = QWidget()
+        col_central.setFixedWidth(330)
+        vbox_central = QVBoxLayout(col_central)
+        vbox_central.setContentsMargins(8, 16, 8, 16)
+        vbox_central.setSpacing(8)
+
+        lbl_pipeline = QLabel("Pipeline de Ejecución")
+        lbl_pipeline.setStyleSheet(
+            "color:#A0AEC0; font-size:11px; font-style:italic; font-weight:bold;"
+        )
+        lbl_estado_flujo = QLabel("Estado del flujo")
+        lbl_estado_flujo.setStyleSheet(
+            "font-weight:bold; font-size:11px; color:#A0AEC0;"
+        )
+
+        def _sep():
+            separator = QFrame()
+            separator.setFrameShape(QFrame.Shape.HLine)
+            separator.setStyleSheet("color:#E2E8F0;")
+            return separator
+
+        for widget in [
+            lbl_pipeline,
+            _sep(),
+            self.lbl_proximo,
+            _sep(),
+            self.btn_ejecutar,
+            self.lbl_alcance,
+            self.btn_detener,
+            self.prg_bar,
+            _sep(),
+            lbl_estado_flujo,
+            self.tracker_widget,
+        ]:
+            vbox_central.addWidget(widget)
+        vbox_central.addStretch()
+
+        col_derecha = QWidget()
+        vbox_derecha = QVBoxLayout(col_derecha)
+        vbox_derecha.setContentsMargins(8, 16, 16, 16)
+        vbox_derecha.setSpacing(6)
+
+        hdr_consola = QWidget()
+        hbox_hdr = QHBoxLayout(hdr_consola)
+        hbox_hdr.setContentsMargins(0, 0, 0, 0)
+        lbl_consola = QLabel("🖥  Consola de ejecución")
+        lbl_consola.setStyleSheet("font-weight:bold; font-size:11px; color:#A0AEC0;")
+        btn_limpiar = QPushButton("Limpiar")
+        btn_limpiar.setFlat(True)
+        btn_limpiar.setStyleSheet("color:#A0AEC0; font-size:11px;")
+        btn_limpiar.clicked.connect(self.limpiar_log)
+        hbox_hdr.addWidget(lbl_consola)
+        hbox_hdr.addStretch()
+        hbox_hdr.addWidget(btn_limpiar)
+
+        sep_log = QFrame()
+        sep_log.setFrameShape(QFrame.Shape.HLine)
+        sep_log.setStyleSheet("color:#E2E8F0;")
+
+        lbl_imgs = QLabel("🖼  Estado de imágenes")
+        lbl_imgs.setStyleSheet("font-size:11px; color:#A0AEC0;")
+
+        vbox_derecha.addWidget(hdr_consola)
+        vbox_derecha.addWidget(self.log_widget, stretch=1)
+        vbox_derecha.addWidget(sep_log)
+        vbox_derecha.addWidget(lbl_imgs)
+        vbox_derecha.addWidget(self.lbl_imagen_status_sidebar)
+
+        def _sep_v():
+            separator = QFrame()
+            separator.setFrameShape(QFrame.Shape.VLine)
+            separator.setStyleSheet("color:#E2E8F0;")
+            return separator
+
+        main_row = QWidget()
+        hbox_main = QHBoxLayout(main_row)
+        hbox_main.setContentsMargins(0, 0, 0, 0)
+        hbox_main.setSpacing(0)
+        hbox_main.addWidget(scroll_izq)
+        hbox_main.addWidget(_sep_v())
+        hbox_main.addWidget(col_central)
+        hbox_main.addWidget(_sep_v())
+        hbox_main.addWidget(col_derecha, stretch=1)
+
+        central = QWidget()
+        vbox_main = QVBoxLayout(central)
+        vbox_main.setContentsMargins(0, 0, 0, 0)
+        vbox_main.setSpacing(0)
+        vbox_main.addWidget(self.header_widget)
+        vbox_main.addWidget(main_row, stretch=1)
+        self.setCentralWidget(central)
+
+    def _connect_ws_bridge(self):
+        ws_bridge.ui_log_cb = self.log_msg
+        ws_bridge.ui_ext_status_cb = self.actualizar_ext_status
+        ws_bridge.ui_image_status_cb = self.actualizar_estado_imagen
+        ws_bridge.ui_update_journeys_cb = self.refrescar_journeys_ui
+
+    def _init_estado_inicial(self):
+        if self.state.ruta_base[0]:
+            self._actualizar_txt_proximo(self.state.ruta_base[0])
+        self.actualizar_ext_status(
+            bool(ws_bridge.extension_bridge_state.get("connected")),
+            ws_bridge.extension_bridge_state.get("version") or "",
+        )
+        self.reset_tracker()
+        self.actualizar_resumen_alcance()
+        self.refrescar_journeys_ui()
+        self.refrescar_canales()
+
+    def _actualizar_txt_proximo(self, ruta):
+        self.txt_proximo_compat.value = f"Próximo Proyecto: video {obtener_siguiente_num(ruta)}"
+
+    def _on_txt_proximo_change(self, texto):
+        self.lbl_proximo.setText(texto)
+
+    def _on_prg_visible(self, visible):
+        self.prg_bar.setVisible(visible)
+
+    def _sync_boton_ejecutar(self, texto_boton, descripcion):
+        if hasattr(self, "btn_ejecutar"):
+            self.btn_ejecutar.setText(texto_boton)
+        if hasattr(self, "lbl_alcance"):
+            self.lbl_alcance.setText(f"Alcance actual: {descripcion}")
+
+    @staticmethod
+    def _style_btn_ejecutar(ejecutando):
+        if ejecutando:
+            return (
+                "QPushButton { background:#A0AEC0; color:white; font-weight:bold;"
+                " font-size:13px; border-radius:6px; }"
+            )
+        return (
+            "QPushButton { background:#276749; color:white; font-weight:bold;"
+            " font-size:13px; border-radius:6px; }"
+            "QPushButton:hover { background:#22543D; }"
+        )
+
+    def _set_estado_ejecutando(self, ejecutando):
+        self.btn_ejecutar.setEnabled(not ejecutando)
+        self.btn_ejecutar.setStyleSheet(self._style_btn_ejecutar(ejecutando))
+        self.btn_detener.setVisible(ejecutando)
+        self.btn_detener.setEnabled(True)
+        self.btn_detener.setText("DETENER FLUJO")
+        self.btn_detener.setStyleSheet(
+            "QPushButton { background:#C53030; color:white; font-weight:bold;"
+            " font-size:13px; border-radius:6px; }"
+        )
+
+    def _detener_flujo(self):
+        self.state.stop_event.set()
+        self.btn_detener.setEnabled(False)
+        self.btn_detener.setText("DETENIENDO...")
+        self.btn_detener.setStyleSheet(
+            "QPushButton { background:#A0AEC0; color:white; border-radius:6px; }"
+        )
+        self.log_msg(
             "⛔ Solicitud de detención enviada. Esperando que el paso actual finalice...",
-            color=ft.Colors.ORANGE_800,
+            color="orange800",
             weight="bold",
             italic=True,
         )
-        page.update()
 
-    def _set_estado_ejecutando(ejecutando):
-        if btn_ejecutar_ref[0]:
-            btn_ejecutar_ref[0].disabled = ejecutando
-            btn_ejecutar_ref[0].bgcolor = (
-                ft.Colors.GREY_500 if ejecutando else ft.Colors.GREEN_700
-            )
-        btn_detener.visible = ejecutando
-        btn_detener.disabled = False
-        btn_detener.text = "DETENER FLUJO"
-        btn_detener.bgcolor = ft.Colors.RED_700
-        page.update()
-
-    def ejecutar_flujo_completo(e):
-        if not state.ruta_base[0]:
-            _show_snack("Selecciona una ruta de proyectos", ft.Colors.RED)
+    def _ejecutar_flujo_completo(self):
+        if not self.state.ruta_base[0]:
+            self.statusBar().showMessage("Selecciona una ruta de proyectos", 4000)
             return
         if not YOUTUBE_API_KEY:
-            _show_snack("Falta API KEY en .env", ft.Colors.RED)
+            self.statusBar().showMessage("Falta API KEY en .env", 4000)
             return
 
-        prompts_a_ejecutar, _ = obtener_prompts_para_ejecucion()
+        prompts_a_ejecutar, _ = self.obtener_prompts_para_ejecucion()
         if not prompts_a_ejecutar:
-            _show_snack("No hay prompts configurados", ft.Colors.RED)
+            self.statusBar().showMessage("No hay prompts configurados", 4000)
             return
 
-        log_container.content.controls.clear()
-        prg.visible = True
-        _set_estado_ejecutando(True)
-        reset_tracker()
-        page.update()
+        self.limpiar_log()
+        self.prg_compat.visible = True
+        self._set_estado_ejecutando(True)
+        self.reset_tracker()
+        self.state.stop_event.clear()
 
         ctx = FlowContext(
-            stop_event=state.stop_event,
-            log_msg=log_msg,
-            ruta_base=state.ruta_base,
-            prompts_lista=state.prompts_lista,
-            tts_config=state.tts_config,
-            whisperx_config=state.whisperx_config,
-            config_actual=state.config_actual,
-            ejecutar_hasta_prompt=state.ejecutar_hasta_prompt,
-            ref_image_paths_state=state.ref_image_paths_state,
-            dropdown_ref_mode=get_ref_mode(),
-            prg=prg,
-            txt_proximo=txt_proximo,
-            page=page,
-            set_estado_ejecutando=_set_estado_ejecutando,
-            obtener_prompts_para_ejecucion=obtener_prompts_para_ejecucion,
-            set_fase_estado=set_fase_estado,
-            reset_tracker=reset_tracker,
+            stop_event=self.state.stop_event,
+            log_msg=self.log_msg,
+            ruta_base=self.state.ruta_base,
+            prompts_lista=self.state.prompts_lista,
+            tts_config=self.state.tts_config,
+            whisperx_config=self.state.whisperx_config,
+            config_actual=self.state.config_actual,
+            ejecutar_hasta_prompt=self.state.ejecutar_hasta_prompt,
+            ref_image_paths_state=self.state.ref_image_paths_state,
+            dropdown_ref_mode=self.dropdown_ref_compat,
+            prg=self.prg_compat,
+            txt_proximo=self.txt_proximo_compat,
+            page=self.page_compat,
+            set_estado_ejecutando=self._set_estado_ejecutando,
+            obtener_prompts_para_ejecucion=self.obtener_prompts_para_ejecucion,
+            set_fase_estado=self.set_fase_estado,
+            reset_tracker=self.reset_tracker,
         )
-        ejecutar_flujo(ctx)
 
-    btn_ejecutar_widget = ft.ElevatedButton(
-        "EJECUTAR FLUJO COMPLETO",
-        icon=ft.Icons.AUTO_AWESOME,
-        on_click=ejecutar_flujo_completo,
-        bgcolor=ft.Colors.GREEN_700,
-        color="white",
-        height=50,
-        width=1000,
-    )
-    btn_ejecutar_ref[0] = btn_ejecutar_widget
+        self._flow_worker = _FlowWorker(ctx)
+        self._flow_worker.finished.connect(self._on_flujo_terminado)
+        self._flow_worker.start()
 
-    btn_limpiar_log = ft.TextButton(
-        "Limpiar",
-        icon=ft.Icons.DELETE_SWEEP,
-        icon_color=ft.Colors.GREY_500,
-        on_click=limpiar_log,
-        style=ft.ButtonStyle(color=ft.Colors.GREY_500),
-    )
+    def _on_flujo_terminado(self):
+        self.prg_compat.visible = False
+        self._set_estado_ejecutando(False)
+        self._flow_worker = None
 
-    col_izquierda = ft.Container(
-        width=420,
-        padding=ft.padding.only(left=16, top=16, right=8, bottom=16),
-        content=ft.Column(
-            [
-                ft.Text(
-                    "Configuración del Pipeline",
-                    size=12,
-                    weight="bold",
-                    color=ft.Colors.GREY_500,
-                    italic=True,
-                ),
-                expansion_proyecto,
-                expansion_prompts,
-                expansion_tts,
-                expansion_whisperx,
-                expansion_ai_studio,
-                expansion_flow,
-            ],
-            spacing=4,
-            scroll=ft.ScrollMode.AUTO,
-        ),
-    )
 
-    col_central = ft.Container(
-        width=320,
-        padding=ft.padding.symmetric(horizontal=8, vertical=16),
-        content=ft.Column(
-            [
-                ft.Text(
-                    "Pipeline de Ejecución",
-                    size=12,
-                    weight="bold",
-                    color=ft.Colors.GREY_500,
-                    italic=True,
-                ),
-                ft.Divider(),
-                txt_proximo,
-                ft.Divider(),
-                btn_ejecutar_widget,
-                txt_alcance_flujo,
-                btn_detener,
-                prg,
-                ft.Divider(),
-                ft.Text(
-                    "Estado del flujo",
-                    size=12,
-                    weight="bold",
-                    color=ft.Colors.GREY_500,
-                ),
-                tracker_widget,
-            ],
-            spacing=10,
-            scroll=ft.ScrollMode.AUTO,
-        ),
-    )
-
-    col_derecha = ft.Container(
-        expand=True,
-        padding=ft.padding.only(left=8, top=16, right=16, bottom=16),
-        content=ft.Column(
-            [
-                ft.Row(
-                    [
-                        ft.Row(
-                            [
-                                ft.Icon(ft.Icons.TERMINAL, color=ft.Colors.GREY_500, size=16),
-                                ft.Text(
-                                    "Consola de ejecución",
-                                    size=12,
-                                    weight="bold",
-                                    color=ft.Colors.GREY_500,
-                                ),
-                            ],
-                            spacing=6,
-                        ),
-                        btn_limpiar_log,
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                log_container,
-                ft.Divider(),
-                ft.Row(
-                    [
-                        ft.Icon(ft.Icons.IMAGE_OUTLINED, color=ft.Colors.GREY_500, size=14),
-                        ft.Text("Estado de imágenes", size=11, color=ft.Colors.GREY_500),
-                    ],
-                    spacing=4,
-                ),
-                lbl_imagen_status_sidebar,
-            ],
-            spacing=8,
-            expand=True,
-        ),
-    )
-
-    if state.ruta_base[0]:
-        txt_proximo.value = f"Próximo Proyecto: video {obtener_siguiente_num(state.ruta_base[0])}"
-
-    actualizar_ext_status_header(
-        bool(ws_bridge.extension_bridge_state.get("connected")),
-        ws_bridge.extension_bridge_state.get("version") or "",
-    )
-    reset_tracker()
-    actualizar_resumen_alcance()
-    refrescar_journeys_ui()
-
-    page.add(
-        header_bar,
-        ft.Row(
-            [
-                col_izquierda,
-                ft.Container(
-                    width=1,
-                    bgcolor=ft.Colors.GREY_200,
-                    margin=ft.margin.symmetric(vertical=16),
-                ),
-                col_central,
-                ft.Container(
-                    width=1,
-                    bgcolor=ft.Colors.GREY_200,
-                    margin=ft.margin.symmetric(vertical=16),
-                ),
-                col_derecha,
-            ],
-            expand=True,
-            spacing=0,
-            vertical_alignment=ft.CrossAxisAlignment.START,
-        ),
-    )
-    refrescar_canales()
+def main():
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())

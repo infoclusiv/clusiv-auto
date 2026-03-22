@@ -1,7 +1,20 @@
 import os
-import threading
 
-import flet as ft
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 import ws_bridge
 from config import (
@@ -18,166 +31,278 @@ from ws_bridge import (
 from youtube_analyzer import obtener_ultimo_video
 
 
-def build_panel_flow(page, state, log_msg):
+class _EnvioPromptsWorker(QThread):
+    resultado = pyqtSignal(bool, str)
+    estado = pyqtSignal(str, str)
+
+    def __init__(self, ruta_txt, modelo, aspect_ratio, count, ref_paths, ref_mode, project_folder):
+        super().__init__()
+        self._ruta_txt = ruta_txt
+        self._modelo = modelo
+        self._aspect_ratio = aspect_ratio
+        self._count = count
+        self._ref_paths = ref_paths
+        self._ref_mode = ref_mode
+        self._project_folder = project_folder
+
+    def run(self):
+        self.estado.emit("Enviando...", "blue800")
+        ok, msg, _ = send_image_prompts_to_extension(
+            self._ruta_txt,
+            modelo=self._modelo,
+            aspect_ratio=self._aspect_ratio,
+            count=self._count,
+            reference_image_paths=self._ref_paths or None,
+            reference_mode=self._ref_mode,
+            project_folder=self._project_folder,
+        )
+        if ok:
+            self.estado.emit(
+                "Prompts enviados. Esperando que Flow genere y descargue imágenes...",
+                "teal700",
+            )
+        else:
+            self.estado.emit(msg, "red700")
+        self.resultado.emit(ok, msg)
+
+
+def build_panel_flow(_page=None, state=None, log_msg=None):
+    """
+    Panel de Generación de Imágenes - Google Flow.
+    Incluye configuración de imágenes, referencias y automatización por Journey.
+
+    Parámetros
+    ----------
+    _page   : ignorado (compatibilidad con firma Flet)
+    state   : AppState
+    log_msg : callable para escribir en la consola
+
+    Retorna
+    -------
+    (widget, None, actualizar_estado_imagen, refrescar_journeys_ui,
+     lbl_imagen_status_sidebar, get_ref_mode)
+    """
     ai_studio_config = state.ai_studio_config
     config_actual = state.config_actual
     ref_image_paths_state = state.ref_image_paths_state
     ruta_base = state.ruta_base
 
-    image_status_refs = []
+    worker_ref = [None]
 
-    def show_snack(msg, color=ft.Colors.GREEN):
-        page.overlay.append(ft.SnackBar(content=ft.Text(msg), bgcolor=color))
-        page.overlay[-1].open = True
-        page.update()
+    status_colors = {
+        "blue700": "#2B6CB0",
+        "blue800": "#2C5282",
+        "teal700": "#2C7A7B",
+        "red700": "#C53030",
+        "green700": "#276749",
+        "grey500": "#A0AEC0",
+    }
 
-    def actualizar_estado_imagen(texto, color=ft.Colors.GREY_500):
-        if not image_status_refs:
-            return
-        for status_control in image_status_refs:
-            status_control.value = texto
-            status_control.color = color
-        if page.controls:
-            page.update()
-
-    imagen_model_inicial = ai_studio_config.get("imagen_model", "imagen4")
-    imagen_aspect_inicial = ai_studio_config.get("imagen_aspect_ratio", "landscape")
-    imagen_count_inicial = str(ai_studio_config.get("imagen_count", 1))
-    auto_send_inicial = ai_studio_config.get("auto_send_to_extension", False)
-
-    switch_auto_send = ft.Switch(
-        label="🔄 Enviar automáticamente al finalizar AI Studio",
-        value=auto_send_inicial,
-        active_color=ft.Colors.TEAL_600,
+    group = QGroupBox("🖼️ Generación de Imágenes - Google Flow")
+    group.setCheckable(True)
+    group.setChecked(False)
+    group.setStyleSheet(
+        "QGroupBox { font-weight: bold; font-size: 13px; margin-top: 6px; }"
+        "QGroupBox::title { subcontrol-origin: margin; left: 8px; }"
     )
 
-    dropdown_imagen_model = ft.Dropdown(
-        label="Modelo de imagen",
-        value=imagen_model_inicial,
-        options=[
-            ft.dropdown.Option("imagen4", "Imagen 4"),
-            ft.dropdown.Option("nano_banana2", "NB 2"),
-            ft.dropdown.Option("nano_banana_pro", "NB Pro"),
-        ],
-        dense=True,
-        expand=True,
-    )
+    scroll_area = QScrollArea()
+    scroll_area.setWidgetResizable(True)
+    scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+    scroll_area.setMaximumHeight(600)
 
-    dropdown_imagen_aspect = ft.Dropdown(
-        label="Aspect Ratio",
-        value=imagen_aspect_inicial,
-        options=[
-            ft.dropdown.Option("landscape", "16:9 Landscape"),
-            ft.dropdown.Option("portrait", "9:16 Portrait"),
-        ],
-        dense=True,
-        expand=True,
-    )
+    inner = QWidget()
+    outer = QVBoxLayout(inner)
+    outer.setContentsMargins(8, 8, 8, 8)
+    outer.setSpacing(10)
+    scroll_area.setWidget(inner)
 
-    dropdown_imagen_count = ft.Dropdown(
-        label="Imágenes por prompt",
-        value=imagen_count_inicial,
-        options=[
-            ft.dropdown.Option("1", "1x"),
-            ft.dropdown.Option("2", "2x"),
-            ft.dropdown.Option("3", "3x"),
-            ft.dropdown.Option("4", "4x"),
-        ],
-        dense=True,
-        expand=True,
-    )
+    group_layout = QVBoxLayout(group)
+    group_layout.setContentsMargins(0, 8, 0, 0)
+    group_layout.addWidget(scroll_area)
 
-    def crear_lbl_imagen_status():
-        control = ft.Text(
-            "Estado: esperando...",
-            size=11,
-            color=ft.Colors.GREY_500,
-            italic=True,
+    def _sep():
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet("color: #E2E8F0;")
+        return separator
+
+    def _lbl_section(texto):
+        label = QLabel(texto)
+        label.setStyleSheet("font-size: 12px; font-weight: bold; color: #4A5568;")
+        return label
+
+    def _combo_style():
+        return (
+            "QComboBox { border: 1px solid #CBD5E0; border-radius: 4px;"
+            " padding: 4px 8px; font-size: 12px; }"
         )
-        image_status_refs.append(control)
-        return control
 
-    lbl_imagen_status = crear_lbl_imagen_status()
-
-    def persistir_imagen_config(e=None, mostrar_snack=False):
-        ai_studio_config["auto_send_to_extension"] = bool(switch_auto_send.value)
-        ai_studio_config["imagen_model"] = dropdown_imagen_model.value or "imagen4"
-        ai_studio_config["imagen_aspect_ratio"] = (
-            dropdown_imagen_aspect.value or "landscape"
+    def _btn_style(bg, hover, text_color="white"):
+        return (
+            f"QPushButton {{ background: {bg}; color: {text_color}; border-radius: 6px;"
+            f" padding: 6px 12px; font-size: 12px; font-weight: bold; }}"
+            f"QPushButton:hover {{ background: {hover}; }}"
+            f"QPushButton:disabled {{ background: #A0AEC0; }}"
         )
-        ai_studio_config["imagen_count"] = dropdown_imagen_count.value or "1"
+
+    outer.addWidget(_lbl_section("Configuración de generación"))
+
+    chk_auto_send = QCheckBox("🔄 Enviar automáticamente al finalizar AI Studio")
+    chk_auto_send.setChecked(bool(ai_studio_config.get("auto_send_to_extension", False)))
+    chk_auto_send.setStyleSheet("font-size: 12px;")
+    outer.addWidget(chk_auto_send)
+
+    row_model_count = QWidget()
+    hbox_mc = QHBoxLayout(row_model_count)
+    hbox_mc.setContentsMargins(0, 0, 0, 0)
+    hbox_mc.setSpacing(6)
+
+    combo_model = QComboBox()
+    combo_model.setStyleSheet(_combo_style())
+    combo_model.addItem("Imagen 4", "imagen4")
+    combo_model.addItem("NB 2", "nano_banana2")
+    combo_model.addItem("NB Pro", "nano_banana_pro")
+    _set_combo_by_data(combo_model, ai_studio_config.get("imagen_model", "imagen4"))
+    hbox_mc.addWidget(combo_model, stretch=1)
+
+    combo_count = QComboBox()
+    combo_count.setStyleSheet(_combo_style())
+    for value, text in [("1", "1x"), ("2", "2x"), ("3", "3x"), ("4", "4x")]:
+        combo_count.addItem(text, value)
+    _set_combo_by_data(combo_count, str(ai_studio_config.get("imagen_count", 1)))
+    hbox_mc.addWidget(combo_count, stretch=1)
+    outer.addWidget(row_model_count)
+
+    combo_aspect = QComboBox()
+    combo_aspect.setStyleSheet(_combo_style())
+    combo_aspect.addItem("16:9 Landscape", "landscape")
+    combo_aspect.addItem("9:16 Portrait", "portrait")
+    _set_combo_by_data(combo_aspect, ai_studio_config.get("imagen_aspect_ratio", "landscape"))
+    outer.addWidget(combo_aspect)
+
+    def persistir_imagen_config():
+        ai_studio_config["auto_send_to_extension"] = chk_auto_send.isChecked()
+        ai_studio_config["imagen_model"] = combo_model.currentData() or "imagen4"
+        ai_studio_config["imagen_aspect_ratio"] = combo_aspect.currentData() or "landscape"
+        ai_studio_config["imagen_count"] = combo_count.currentData() or "1"
 
         normalizado = normalizar_ai_studio_config(ai_studio_config)
         ai_studio_config.update(normalizado)
-
-        switch_auto_send.value = ai_studio_config["auto_send_to_extension"]
-        dropdown_imagen_model.value = ai_studio_config["imagen_model"]
-        dropdown_imagen_aspect.value = ai_studio_config["imagen_aspect_ratio"]
-        dropdown_imagen_count.value = str(ai_studio_config["imagen_count"])
         config_actual["ai_studio"] = dict(ai_studio_config)
         config_actual["prompt_ai_studio"] = ai_studio_config["prompt"]
-
         guardar_config(ai_studio=ai_studio_config)
-        if mostrar_snack:
-            show_snack("Configuración de imágenes guardada", ft.Colors.GREEN)
-        page.update()
 
-    switch_auto_send.on_change = persistir_imagen_config
-    dropdown_imagen_model.on_change = persistir_imagen_config
-    dropdown_imagen_aspect.on_change = persistir_imagen_config
-    dropdown_imagen_count.on_change = persistir_imagen_config
+    chk_auto_send.stateChanged.connect(lambda _: persistir_imagen_config())
+    combo_model.currentIndexChanged.connect(lambda _: persistir_imagen_config())
+    combo_aspect.currentIndexChanged.connect(lambda _: persistir_imagen_config())
+    combo_count.currentIndexChanged.connect(lambda _: persistir_imagen_config())
 
-    dropdown_ref_mode = ft.Dropdown(
-        label="Modo de referencia",
-        value="ingredients",
-        options=[
-            ft.dropdown.Option("ingredients", "Ingredients (mezcla libre)"),
-            ft.dropdown.Option("frames", "Frames (secuencia ordenada)"),
-        ],
-        dense=True,
-        expand=True,
-    )
+    outer.addWidget(_sep())
+    outer.addWidget(_lbl_section("🔍 Imágenes de referencia (opcional)"))
 
-    lbl_ref_images = ft.Text(
-        "Sin imágenes de referencia",
-        size=11,
-        color=ft.Colors.GREY_500,
-        italic=True,
-    )
+    combo_ref_mode = QComboBox()
+    combo_ref_mode.setStyleSheet(_combo_style())
+    combo_ref_mode.addItem("Ingredients (mezcla libre)", "ingredients")
+    combo_ref_mode.addItem("Frames (secuencia ordenada)", "frames")
+    outer.addWidget(combo_ref_mode)
+
+    lbl_ref_images = QLabel("Sin imágenes de referencia")
+    lbl_ref_images.setStyleSheet("font-size: 11px; color: #A0AEC0; font-style: italic;")
+    lbl_ref_images.setWordWrap(True)
 
     def _actualizar_label_ref_images():
         count = len(ref_image_paths_state)
         if count == 0:
-            lbl_ref_images.value = "Sin imágenes de referencia"
-            lbl_ref_images.color = ft.Colors.GREY_500
-            return
+            lbl_ref_images.setText("Sin imágenes de referencia")
+            lbl_ref_images.setStyleSheet("font-size: 11px; color: #A0AEC0; font-style: italic;")
+        else:
+            nombres = ", ".join(os.path.basename(path) for path in ref_image_paths_state)
+            lbl_ref_images.setText(f"{count} imagen(es): {nombres}")
+            lbl_ref_images.setStyleSheet("font-size: 11px; color: #2C7A7B; font-style: italic;")
 
-        nombres = ", ".join(os.path.basename(path) for path in ref_image_paths_state)
-        lbl_ref_images.value = f"{count} imagen(es): {nombres}"
-        lbl_ref_images.color = ft.Colors.TEAL_700
+    row_ref_btns = QWidget()
+    hbox_ref = QHBoxLayout(row_ref_btns)
+    hbox_ref.setContentsMargins(0, 0, 0, 0)
+    hbox_ref.setSpacing(6)
 
-    def on_ref_images_picked(files):
-        if not files:
-            return
+    btn_sel_imgs = QPushButton("📷  Seleccionar imágenes")
+    btn_sel_imgs.setStyleSheet(_btn_style("#E6FFFA", "#B2F5EA", "#285E61"))
 
-        for selected_file in files:
-            if selected_file.path and selected_file.path not in ref_image_paths_state:
-                ref_image_paths_state.append(selected_file.path)
+    btn_limpiar_imgs = QPushButton("✕")
+    btn_limpiar_imgs.setFixedWidth(32)
+    btn_limpiar_imgs.setToolTip("Limpiar selección")
+    btn_limpiar_imgs.setStyleSheet(_btn_style("#FED7D7", "#FEB2B2", "#C53030"))
 
+    def _seleccionar_ref_images():
+        archivos, _ = QFileDialog.getOpenFileNames(
+            group,
+            "Seleccionar imágenes de referencia",
+            "",
+            "Imágenes (*.png *.jpg *.jpeg *.webp)",
+        )
+        for archivo in archivos:
+            if archivo not in ref_image_paths_state:
+                ref_image_paths_state.append(archivo)
         _actualizar_label_ref_images()
-        page.update()
 
-    def limpiar_ref_images(e=None):
+    def _limpiar_ref_images():
         ref_image_paths_state.clear()
         _actualizar_label_ref_images()
-        page.update()
 
-    def enviar_prompts_manualmente(e):
+    btn_sel_imgs.clicked.connect(_seleccionar_ref_images)
+    btn_limpiar_imgs.clicked.connect(_limpiar_ref_images)
+    hbox_ref.addWidget(btn_sel_imgs, stretch=1)
+    hbox_ref.addWidget(btn_limpiar_imgs)
+    outer.addWidget(row_ref_btns)
+    outer.addWidget(lbl_ref_images)
+
+    outer.addWidget(_sep())
+
+    lbl_status = QLabel("Estado: esperando...")
+    lbl_status.setStyleSheet("font-size: 11px; color: #A0AEC0; font-style: italic;")
+    lbl_status.setWordWrap(True)
+    outer.addWidget(lbl_status)
+
+    lbl_imagen_status_sidebar = QLabel("Estado: esperando...")
+    lbl_imagen_status_sidebar.setStyleSheet(
+        "font-size: 11px; color: #A0AEC0; font-style: italic;"
+    )
+
+    def actualizar_estado_imagen(texto, color=None):
+        color_hex = status_colors.get(
+            str(color).lower().replace("_", "").replace(".", ""),
+            "#A0AEC0",
+        )
+
+        def _apply():
+            css = f"font-size: 11px; color: {color_hex}; font-style: italic;"
+            lbl_status.setText(texto)
+            lbl_status.setStyleSheet(css)
+            lbl_imagen_status_sidebar.setText(texto)
+            lbl_imagen_status_sidebar.setStyleSheet(css)
+
+        QTimer.singleShot(0, _apply)
+
+    row_envio = QWidget()
+    hbox_envio = QHBoxLayout(row_envio)
+    hbox_envio.setContentsMargins(0, 0, 0, 0)
+    hbox_envio.setSpacing(6)
+
+    btn_enviar = QPushButton("📤  Enviar Prompts")
+    btn_enviar.setStyleSheet(_btn_style("#2C7A7B", "#285E61"))
+
+    btn_cola = QPushButton("ℹ")
+    btn_cola.setFixedWidth(32)
+    btn_cola.setToolTip("Ver estado de la cola")
+    btn_cola.setStyleSheet(_btn_style("#E6FFFA", "#B2F5EA", "#285E61"))
+
+    def _enviar_prompts():
         persistir_imagen_config()
-
         ultimo_video = obtener_ultimo_video(ruta_base[0])
         if not ultimo_video:
-            show_snack("No hay proyectos generados todavía.", ft.Colors.RED)
+            if log_msg:
+                log_msg("❌ No hay proyectos generados todavía.", color="red700")
             return
 
         ruta_txt = os.path.join(
@@ -185,295 +310,239 @@ def build_panel_flow(page, state, log_msg):
             ai_studio_config.get("archivo_salida", AI_STUDIO_OUTPUT_FILENAME_DEFAULT),
         )
 
-        def hilo_envio():
-            actualizar_estado_imagen("Enviando...", ft.Colors.BLUE_700)
-            ok, msg, _ = send_image_prompts_to_extension(
-                ruta_txt,
-                modelo=ai_studio_config.get("imagen_model", "imagen4"),
-                aspect_ratio=ai_studio_config.get("imagen_aspect_ratio", "landscape"),
-                count=ai_studio_config.get("imagen_count", 1),
-                reference_image_paths=list(ref_image_paths_state) if ref_image_paths_state else None,
-                reference_mode=dropdown_ref_mode.value or "ingredients",
-                project_folder=ultimo_video,
-            )
-            if ok:
-                actualizar_estado_imagen(
-                    "Prompts enviados. Esperando que Flow genere y descargue imágenes...",
-                    ft.Colors.TEAL_700,
-                )
-            else:
-                actualizar_estado_imagen(msg, ft.Colors.RED_700)
-            log_msg(
-                f"{'✅' if ok else '❌'} Imágenes: {msg}",
-                color=ft.Colors.GREEN_700 if ok else ft.Colors.RED,
-            )
+        btn_enviar.setEnabled(False)
 
-        threading.Thread(target=hilo_envio, daemon=True).start()
+        worker = _EnvioPromptsWorker(
+            ruta_txt=ruta_txt,
+            modelo=ai_studio_config.get("imagen_model", "imagen4"),
+            aspect_ratio=ai_studio_config.get("imagen_aspect_ratio", "landscape"),
+            count=ai_studio_config.get("imagen_count", 1),
+            ref_paths=list(ref_image_paths_state) if ref_image_paths_state else [],
+            ref_mode=combo_ref_mode.currentData() or "ingredients",
+            project_folder=ultimo_video,
+        )
+        worker_ref[0] = worker
 
-    def solicitar_estado_cola(e):
+        worker.estado.connect(lambda txt, col: actualizar_estado_imagen(txt, col))
+        worker.resultado.connect(
+            lambda ok, msg: (
+                log_msg(
+                    f"{'✅' if ok else '❌'} Imágenes: {msg}",
+                    color="green700" if ok else "red700",
+                ) if log_msg else None,
+                btn_enviar.setEnabled(True),
+                worker_ref.__setitem__(0, None),
+            )
+        )
+        worker.start()
+
+    def _solicitar_estado_cola():
         if not send_ws_msg({"action": "GET_QUEUE_STATUS"}):
-            show_snack("La extensión no está conectada.", ft.Colors.RED)
+            if log_msg:
+                log_msg("❌ La extensión no está conectada.", color="red700")
         else:
-            actualizar_estado_imagen(
-                "Solicitando estado de la cola...",
-                ft.Colors.BLUE_700,
-            )
+            actualizar_estado_imagen("Solicitando estado de la cola...", "blue700")
 
-    dropdown_journeys = ft.Dropdown(label="Journey principal", expand=True)
-    dropdown_second_journey = ft.Dropdown(
-        label="Segunda automatización",
-        expand=True,
-        disabled=True,
-    )
+    btn_enviar.clicked.connect(_enviar_prompts)
+    btn_cola.clicked.connect(_solicitar_estado_cola)
+    hbox_envio.addWidget(btn_enviar, stretch=1)
+    hbox_envio.addWidget(btn_cola)
+    outer.addWidget(row_envio)
 
-    chk_pegar_script = ft.Switch(
-        label="📝 Pegar script.txt al finalizar Journey",
-        value=True,
-        active_color=ft.Colors.BLUE_600,
-    )
-    chk_segundo_journey = ft.Switch(
-        label="🔁 Ejecutar segunda automatización luego del pegado",
-        value=False,
-        active_color=ft.Colors.BLUE_600,
-    )
+    outer.addWidget(_sep())
+    outer.addWidget(_lbl_section("🌐 Automatización por Journey (Chrome)"))
 
-    def actualizar_estado_segundo_journey(e=None):
-        dropdown_second_journey.disabled = not chk_segundo_journey.value
-        if not chk_segundo_journey.value:
-            dropdown_second_journey.value = None
-        page.update()
+    row_journey_sel = QWidget()
+    hbox_js = QHBoxLayout(row_journey_sel)
+    hbox_js.setContentsMargins(0, 0, 0, 0)
+    hbox_js.setSpacing(4)
 
-    chk_segundo_journey.on_change = actualizar_estado_segundo_journey
+    combo_journeys = QComboBox()
+    combo_journeys.setStyleSheet(_combo_style())
+    combo_journeys.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    hbox_js.addWidget(combo_journeys, stretch=1)
 
-    def obtener_texto_script_ultimo_video():
+    btn_reload_journeys = QPushButton("🔄")
+    btn_reload_journeys.setFixedWidth(32)
+    btn_reload_journeys.setToolTip("Recargar lista de Journeys")
+    btn_reload_journeys.setStyleSheet(_btn_style("#EBF8FF", "#BEE3F8", "#2B6CB0"))
+    hbox_js.addWidget(btn_reload_journeys)
+    outer.addWidget(row_journey_sel)
+
+    chk_segundo_journey = QCheckBox("🔁 Ejecutar segunda automatización luego del pegado")
+    chk_segundo_journey.setChecked(False)
+    chk_segundo_journey.setStyleSheet("font-size: 12px;")
+    outer.addWidget(chk_segundo_journey)
+
+    combo_second_journey = QComboBox()
+    combo_second_journey.setStyleSheet(_combo_style())
+    combo_second_journey.setEnabled(False)
+    outer.addWidget(combo_second_journey)
+
+    chk_pegar_script = QCheckBox("📝 Pegar script.txt al finalizar Journey")
+    chk_pegar_script.setChecked(True)
+    chk_pegar_script.setStyleSheet("font-size: 12px;")
+    outer.addWidget(chk_pegar_script)
+
+    def _on_segundo_journey_changed():
+        combo_second_journey.setEnabled(chk_segundo_journey.isChecked())
+        if not chk_segundo_journey.isChecked():
+            combo_second_journey.setCurrentIndex(-1)
+
+    chk_segundo_journey.stateChanged.connect(lambda _: _on_segundo_journey_changed())
+
+    def refrescar_journeys_ui():
+        """Llamado por ws_bridge cuando llega la lista de journeys."""
+
+        def _apply():
+            prev_primary = combo_journeys.currentData()
+            prev_secondary = combo_second_journey.currentData()
+            valid_ids = {journey["id"] for journey in ws_bridge.available_journeys}
+
+            combo_journeys.blockSignals(True)
+            combo_second_journey.blockSignals(True)
+            combo_journeys.clear()
+            combo_second_journey.clear()
+
+            for journey in ws_bridge.available_journeys:
+                combo_journeys.addItem(journey["name"], journey["id"])
+                combo_second_journey.addItem(journey["name"], journey["id"])
+
+            if prev_primary in valid_ids:
+                _set_combo_by_data(combo_journeys, prev_primary)
+            elif ws_bridge.available_journeys:
+                combo_journeys.setCurrentIndex(0)
+
+            if prev_secondary in valid_ids:
+                _set_combo_by_data(combo_second_journey, prev_secondary)
+
+            combo_journeys.blockSignals(False)
+            combo_second_journey.blockSignals(False)
+
+        QTimer.singleShot(0, _apply)
+
+    def _solicitar_journeys():
+        if not send_ws_msg({"action": "GET_JOURNEYS"}):
+            if log_msg:
+                log_msg("❌ La extensión de Chrome no está conectada", color="red700")
+
+    btn_reload_journeys.clicked.connect(_solicitar_journeys)
+
+    def _obtener_texto_script():
         ultimo_video = obtener_ultimo_video(ruta_base[0])
         if not ultimo_video:
             return None, "No hay proyectos generados aún en la carpeta"
-
         script_path = os.path.join(ultimo_video, "script.txt")
         if not os.path.exists(script_path):
             return None, "No se encontró script.txt en el último proyecto."
+        with open(script_path, "r", encoding="utf-8") as file_handle:
+            return file_handle.read(), None
 
-        with open(script_path, "r", encoding="utf-8") as f:
-            return f.read(), None
+    row_journey_btns = QWidget()
+    hbox_jb = QHBoxLayout(row_journey_btns)
+    hbox_jb.setContentsMargins(0, 0, 0, 0)
+    hbox_jb.setSpacing(6)
 
-    def refrescar_journeys_ui():
-        """Se llama automáticamente cuando el navegador envía la lista"""
-        current_primary = dropdown_journeys.value
-        current_secondary = dropdown_second_journey.value
-        primary_options = [
-            ft.dropdown.Option(key=j["id"], text=j["name"])
-            for j in ws_bridge.available_journeys
-        ]
-        secondary_options = [
-            ft.dropdown.Option(key=j["id"], text=j["name"])
-            for j in ws_bridge.available_journeys
-        ]
-        valid_ids = {j["id"] for j in ws_bridge.available_journeys}
-        dropdown_journeys.options = primary_options
-        dropdown_second_journey.options = secondary_options
+    btn_ejecutar_journey = QPushButton("▶  Ejecutar Journey")
+    btn_ejecutar_journey.setStyleSheet(_btn_style("#2C5282", "#2A4365"))
 
-        if current_primary in valid_ids:
-            dropdown_journeys.value = current_primary
-        elif ws_bridge.available_journeys:
-            dropdown_journeys.value = ws_bridge.available_journeys[0]["id"]
+    btn_pegar_ahora = QPushButton("📋")
+    btn_pegar_ahora.setFixedWidth(32)
+    btn_pegar_ahora.setToolTip("Pegar script.txt ahora (Paso Manual)")
+    btn_pegar_ahora.setStyleSheet(_btn_style("#EBF8FF", "#BEE3F8", "#2B6CB0"))
 
-        if current_secondary in valid_ids:
-            dropdown_second_journey.value = current_secondary
-        elif current_secondary:
-            dropdown_second_journey.value = None
-
-        page.update()
-
-    def solicitar_journeys(e):
-        if not send_ws_msg({"action": "GET_JOURNEYS"}):
-            show_snack("La extensión de Chrome no está conectada", ft.Colors.RED)
-
-    def ordenar_ejecucion_journey(e):
-        if not dropdown_journeys.value:
-            show_snack("Selecciona un Journey primero", ft.Colors.RED)
+    def _ordenar_ejecucion_journey():
+        journey_id = combo_journeys.currentData()
+        if not journey_id:
+            if log_msg:
+                log_msg("⚠ Selecciona un Journey primero", color="orange700")
             return
 
-        if chk_segundo_journey.value:
-            if not chk_pegar_script.value:
-                show_snack("Activa el pegado de script.txt para encadenar la segunda automatización", ft.Colors.RED)
+        usar_segundo = chk_segundo_journey.isChecked()
+        pegar_script = chk_pegar_script.isChecked()
+
+        if usar_segundo:
+            if not pegar_script:
+                if log_msg:
+                    log_msg(
+                        "⚠ Activa el pegado de script.txt para encadenar la segunda automatización",
+                        color="orange700",
+                    )
                 return
-            if not dropdown_second_journey.value:
-                show_snack("Selecciona la segunda automatización", ft.Colors.RED)
+            second_id = combo_second_journey.currentData()
+            if not second_id:
+                if log_msg:
+                    log_msg("⚠ Selecciona la segunda automatización", color="orange700")
                 return
-            if dropdown_second_journey.value == dropdown_journeys.value:
-                show_snack("El segundo journey debe ser distinto del principal", ft.Colors.RED)
+            if second_id == journey_id:
+                if log_msg:
+                    log_msg("⚠ El segundo journey debe ser distinto del principal", color="orange700")
                 return
 
-        payload = {
-            "action": "RUN_JOURNEY",
-            "journey_id": dropdown_journeys.value,
-        }
+        payload = {"action": "RUN_JOURNEY", "journey_id": journey_id}
 
-        if chk_pegar_script.value:
-            script_text, error_msg = obtener_texto_script_ultimo_video()
+        if pegar_script:
+            script_text, error_msg = _obtener_texto_script()
             if error_msg:
-                show_snack(error_msg, ft.Colors.RED)
+                if log_msg:
+                    log_msg(f"❌ {error_msg}", color="red700")
                 return
             payload["paste_text_at_end"] = script_text
 
-        if chk_segundo_journey.value:
-            set_pending_journey_chain(
-                dropdown_journeys.value,
-                dropdown_second_journey.value,
-            )
+        if usar_segundo:
+            set_pending_journey_chain(journey_id, combo_second_journey.currentData())
         else:
             reset_pending_journey_chain()
 
         if not send_ws_msg(payload):
             reset_pending_journey_chain()
-            show_snack("La extensión de Chrome no está conectada", ft.Colors.RED)
+            if log_msg:
+                log_msg("❌ La extensión de Chrome no está conectada", color="red700")
         else:
-            show_snack("Orden de ejecución enviada", ft.Colors.GREEN)
-            if chk_segundo_journey.value:
+            if log_msg:
+                log_msg("✅ Orden de ejecución enviada", color="green700")
+            if usar_segundo and log_msg:
                 log_msg(
                     "⏳ Esperando señal de pegado completado para disparar la segunda automatización...",
-                    color=ft.Colors.BLUE_800,
+                    color="blue800",
                 )
 
-    def pegar_script_ahora(e):
-        text, error_msg = obtener_texto_script_ultimo_video()
+    def _pegar_script_ahora():
+        text, error_msg = _obtener_texto_script()
         if error_msg:
-            show_snack(error_msg, ft.Colors.RED)
+            if log_msg:
+                log_msg(f"❌ {error_msg}", color="red700")
             return
-
         if send_ws_msg({"action": "PASTE_TEXT_NOW", "text": text}):
-            show_snack("Texto enviado a la extensión", ft.Colors.GREEN)
+            if log_msg:
+                log_msg("✅ Texto enviado a la extensión", color="green700")
         else:
-            show_snack("La extensión no está conectada", ft.Colors.RED)
+            if log_msg:
+                log_msg("❌ La extensión no está conectada", color="red700")
 
-    ref_images_picker = ft.FilePicker()
-    lbl_imagen_status_sidebar = crear_lbl_imagen_status()
-
-    expansion_flow = ft.ExpansionTile(
-        title=ft.Text("🖼️ Generación de Imágenes - Google Flow", weight="bold", size=13),
-        subtitle=ft.Text(
-            "Extensión Chrome + Flow Automator (Fase 6)",
-            size=11,
-            color=ft.Colors.GREY_600,
-        ),
-        expanded=False,
-        controls=[
-            ft.Text(
-                "Configuración de generación",
-                size=12,
-                weight="bold",
-                color=ft.Colors.GREY_700,
-            ),
-            switch_auto_send,
-            ft.Row([dropdown_imagen_model, dropdown_imagen_count]),
-            dropdown_imagen_aspect,
-            ft.Divider(),
-            ft.Row(
-                [
-                    ft.Icon(ft.Icons.IMAGE_SEARCH, color=ft.Colors.TEAL_600, size=16),
-                    ft.Text("Imágenes de referencia (opcional)", size=12, weight="bold"),
-                ]
-            ),
-            dropdown_ref_mode,
-            ft.Row(
-                [
-                    ft.ElevatedButton(
-                        "Seleccionar imágenes",
-                        icon=ft.Icons.ADD_PHOTO_ALTERNATE,
-                        on_click=lambda _: on_ref_images_picked(
-                            ref_images_picker.pick_files(
-                                allow_multiple=True,
-                                allowed_extensions=["png", "jpg", "jpeg", "webp"],
-                            )
-                        ),
-                        expand=True,
-                        bgcolor=ft.Colors.TEAL_50,
-                        color=ft.Colors.TEAL_800,
-                    ),
-                    ft.IconButton(
-                        ft.Icons.CLEAR,
-                        on_click=limpiar_ref_images,
-                        tooltip="Limpiar selección",
-                        icon_color=ft.Colors.RED_400,
-                    ),
-                ]
-            ),
-            lbl_ref_images,
-            ft.Divider(),
-            lbl_imagen_status,
-            ft.Row(
-                [
-                    ft.ElevatedButton(
-                        "Enviar Prompts",
-                        icon=ft.Icons.SEND,
-                        on_click=enviar_prompts_manualmente,
-                        expand=True,
-                        bgcolor=ft.Colors.TEAL_700,
-                        color="white",
-                    ),
-                    ft.IconButton(
-                        ft.Icons.INFO_OUTLINE,
-                        on_click=solicitar_estado_cola,
-                        tooltip="Ver estado de la cola",
-                        icon_color=ft.Colors.TEAL_700,
-                        bgcolor=ft.Colors.TEAL_50,
-                    ),
-                ]
-            ),
-            ft.Divider(),
-            ft.Row(
-                [
-                    ft.Icon(ft.Icons.LANGUAGE, color=ft.Colors.BLUE_500, size=16),
-                    ft.Text("Automatización por Journey (Chrome)", size=12, weight="bold"),
-                ]
-            ),
-            ft.Row(
-                [
-                    dropdown_journeys,
-                    ft.IconButton(
-                        ft.Icons.REFRESH,
-                        on_click=solicitar_journeys,
-                        tooltip="Recargar lista de Journeys",
-                        icon_color=ft.Colors.BLUE_700,
-                    ),
-                ]
-            ),
-            chk_segundo_journey,
-            dropdown_second_journey,
-            chk_pegar_script,
-            ft.Row(
-                [
-                    ft.ElevatedButton(
-                        "Ejecutar Journey",
-                        icon=ft.Icons.PLAY_ARROW,
-                        on_click=ordenar_ejecucion_journey,
-                        expand=True,
-                        bgcolor=ft.Colors.BLUE_800,
-                        color="white",
-                    ),
-                    ft.IconButton(
-                        ft.Icons.PASTE,
-                        tooltip="Pegar script.txt ahora (Paso Manual)",
-                        on_click=pegar_script_ahora,
-                        icon_color=ft.Colors.BLUE_800,
-                        bgcolor=ft.Colors.BLUE_50,
-                    ),
-                ]
-            ),
-        ],
-    )
+    btn_ejecutar_journey.clicked.connect(_ordenar_ejecucion_journey)
+    btn_pegar_ahora.clicked.connect(_pegar_script_ahora)
+    hbox_jb.addWidget(btn_ejecutar_journey, stretch=1)
+    hbox_jb.addWidget(btn_pegar_ahora)
+    outer.addWidget(row_journey_btns)
 
     _actualizar_label_ref_images()
 
     def get_ref_mode():
-        return dropdown_ref_mode.value or "ingredients"
+        return combo_ref_mode.currentData() or "ingredients"
 
     return (
-        expansion_flow,
-        ref_images_picker,
+        group,
+        None,
         actualizar_estado_imagen,
         refrescar_journeys_ui,
         lbl_imagen_status_sidebar,
         get_ref_mode,
     )
+
+
+def _set_combo_by_data(combo, data_value):
+    """Selecciona el item del QComboBox cuyo data() coincida con data_value."""
+    idx = combo.findData(data_value)
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
